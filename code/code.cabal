@@ -1,0 +1,58 @@
+cabal-version: >=1.10
+name: code
+version: 0.1.0.0
+author: Ben Radford
+build-type: Simple
+
+library
+  default-language: Haskell2010
+  exposed-modules:
+    Http.Server
+    Log
+    Sqlite
+  build-depends:
+    base,
+    binary,
+    bytestring,
+    direct-sqlite,
+    directory,
+    http-client,
+    http-types,
+    process,
+    text,
+    time,
+    unix,
+    wai,
+    warp
+  ghc-options:
+    -fwarn-unused-imports
+  hs-source-dirs:
+    common
+
+executable log-view
+  default-language: Haskell2010
+  main-is: Main.hs
+  build-depends:
+    attoparsec,
+    base,
+    binary,
+    bytestring,
+    code,
+    containers,
+    direct-sqlite,
+    directory,
+    http-types,
+    process,
+    random,
+    text,
+    time,
+    unix,
+    wai,
+    warp
+  ghc-options:
+    -fwarn-unused-imports
+    -threaded
+  hs-source-dirs:
+    log-view
+  other-modules:
+    Strace
