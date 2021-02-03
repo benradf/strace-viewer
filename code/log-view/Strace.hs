@@ -1,9 +1,15 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Strace
-  ( main
+  ( StraceEntry(..)
+  , Syscall(..)
+  , Signal(..)
+  , Exit(..)
+  , test
+  , parser
   ) where
 
 import Data.Attoparsec.ByteString.Char8 (Parser)
@@ -11,18 +17,21 @@ import qualified Data.Attoparsec.ByteString.Char8 as Parser
 import Data.ByteString.Char8 (unpack)
 import qualified Data.ByteString.Char8 as ByteString
 import Data.Either (fromLeft, fromRight)
-import Data.Functor (($>))
+import Data.Functor (($>), void)
 import Data.Int (Int64)
 import Data.Set (Set)
 import Data.Text (Text)
+import qualified Data.Text as Text
 import Data.Text.Encoding (decodeUtf8)
 import Data.Time.Format (defaultTimeLocale, parseTimeM)
+import Data.Time.Format.ISO8601 (iso8601Show)
 import Data.Time.LocalTime (TimeOfDay)
 import Data.Traversable (for)
-import Database.SQLite3 (Database)
+import Database.SQLite3 (Database, SQLData(..), lastInsertRowId)
 import Http.Server
 import qualified Sqlite
 import Sqlite hiding (withDatabase)
+import System.Environment (getArgs)
 import System.Posix.Types (ProcessID)
 import System.Process (CreateProcess(..), StdStream(..), proc, withCreateProcess)
 
@@ -33,14 +42,14 @@ data Syscall = Syscall
   , syscallArgs :: Text
   , syscallReturn :: Text
   }
-  deriving Show
+  deriving (Eq, Show)
 
 data Signal = Signal
   { signalPid :: ProcessID
   , signalTime :: TimeOfDay
   , signalType :: Text
   }
-  deriving Show
+  deriving (Eq, Show)
 
 data Exit = Exit
   { exitPid :: ProcessID
@@ -48,7 +57,7 @@ data Exit = Exit
   , exitCode :: Maybe Int64
   , exitSignal :: Maybe Text
   }
-  deriving Show
+  deriving (Eq, Show)
 
 ---
 
@@ -74,11 +83,53 @@ data Context = Context
   }
   deriving Show
 
-main :: IO ()
-main = withDatabase "/tmp/strace.sqlite" $ \database _ -> do
+test :: IO ()
+test = withDatabase "/tmp/strace.sqlite" $ \database _ -> do
   loadLogs >>= \case
     Left e -> error e
-    Right entries -> for entries $ putStrLn . show
+    Right entries -> for entries $ \case
+      StraceExit exit@Exit{..} -> do
+        void $ executeSql database
+          [ "INSERT INTO exit (time, pid, code, signal)"
+          , "VALUES (?, ?, ?, ?);" ]
+          [ SQLText $ Text.pack $ iso8601Show exitTime
+          , SQLInteger $ fromIntegral exitPid
+          , maybe SQLNull SQLInteger exitCode
+          , maybe SQLNull SQLText exitSignal
+          ]
+      StraceSyscall syscall@Syscall{..} -> do
+        -- TODO: Consider batching inserts because the following is extremely inefficient.
+        executeSql database
+          [ "INSERT INTO syscall (pid, time, name, args, return)"
+          , "VALUES (?, ?, ?, ?, ?);" ]
+          [ SQLInteger $ fromIntegral syscallPid
+          , SQLText $ Text.pack $ iso8601Show syscallTime
+          , SQLText syscallName
+          , SQLText syscallArgs
+          , SQLText syscallReturn
+          ]
+        id <- lastInsertRowId database
+        case syscallName of
+        {- TODO: Populate the clone and execve tables with:
+                  INSERT INTO clone (id, child_pid)
+                  SELECT id, return FROM syscall
+                  WHERE name = 'clone';
+          So are these tables really necessary at all?
+          Should probably get rid of them.
+        -}
+--          "clone" -> void $ executeSql database
+--            [ "INSERT INTO clone (id, child_pid)"
+--            , "VALUES (?, ?);" ]
+--            [ SQLInteger id
+--            , SQLInteger $ read $ Text.unpack syscallReturn
+--            ]
+--          "execve" -> pure ()
+          _ -> pure ()
+      _ -> pure ()
+--  executeSql database
+--    [ "INSERT INTO context (name, start, end, hidden, syscalls)"
+--    , "SELECT name, start, end, hidden, syscalls FROM context"
+--    , "WHERE id = ?;" ] [ SQLInteger id ]  -- TODO: Handle 404 not found
 --  let time = "2021-01-31T16:24:00.069705975Z"
 --  executeStatements database $ pure <$>
 --    [ "insert or replace into context_end (id, time) values (1, \"" <> time <> "\"), (2, \"" <> time <> "\");"
@@ -248,13 +299,12 @@ withDatabase path application = Sqlite.withDatabase path $
 
 createSchema :: Database -> IO ()
 createSchema database = executeStatements database
-  [ [ "CREATE TABLE IF NOT EXISTS strace ("
+  [ [ "CREATE TABLE IF NOT EXISTS syscall ("
     , "  id INTEGER,"
-    , "  raw TEXT,"
     , "  pid INTEGER,"
     , "  time TEXT,"
-    , "  syscall TEXT,"
-    , "  arguments TEXT,"
+    , "  name TEXT,"
+    , "  args TEXT,"
     , "  return TEXT,"
     , "  PRIMARY KEY (id)"
     , ");"
@@ -281,8 +331,7 @@ createSchema database = executeStatements database
   , [ "CREATE TABLE IF NOT EXISTS signal ("
     , "  time TEXT,"
     , "  pid INTEGER,"
-    , "  type TEXT,"
-    , "  info TEXT"
+    , "  type TEXT"
     , ");"
     ]
   ]
@@ -293,24 +342,24 @@ render = error "not implemented"
 layout :: [Process] -> [[Process]]
 layout = error "not implemented"
 
-
--- strace-log-merge
-
 loadLogs :: IO (Either String [StraceEntry])
 loadLogs = do
   let spec = (proc "strace-log-merge" [ "var/log/strace/process" ])
         { std_in = NoStream , std_out = CreatePipe , std_err = CreatePipe }
   withCreateProcess spec $ \_ (Just output) _ _ -> do
-    lines <- take 50 . ByteString.lines <$> ByteString.hGetContents output
+    n <- read . head <$> getArgs
+    lines <- take n . ByteString.lines <$> ByteString.hGetContents output
     putStrLn $ show (length lines) <> " lines read"
-    pure $ for lines $ Parser.parseOnly parser
+    results <- for lines $ \line ->
+      pure (Parser.parseOnly parser line) -- `finally` ByteString.putStrLn line
+    pure $ sequenceA results
 
 
 data StraceEntry
   = StraceSyscall Syscall
   | StraceSignal Signal
   | StraceExit Exit
-  deriving Show
+  deriving (Eq, Show)
 
 parser :: Parser StraceEntry
 parser = do
@@ -326,8 +375,20 @@ parser = do
     [ StraceSyscall <$> do
         let syscallPid = pid
             syscallTime = time
-        syscallName <- decodeUtf8 <$> Parser.takeWhile (Parser.inClass "0-9a-z")
-        let consumeNonParens = Parser.takeWhile (Parser.notInClass "()")
+        syscallName <- decodeUtf8 <$> Parser.takeWhile (Parser.inClass "0-9a-z_")
+        let consumeNonParens :: Parser ByteString
+            consumeNonParens = mconcat <$> sequenceA
+              [ Parser.takeWhile (Parser.notInClass "()\"")
+              , Parser.option "" $ mconcat <$> sequenceA
+                [ Parser.char '"' $> "\""
+                , fmap mconcat $ Parser.many' $ Parser.choice
+                  [ ByteString.pack <$> sequenceA [ Parser.char '\\' , Parser.anyChar ]
+                  , ByteString.singleton <$> Parser.notChar '"'
+                  ]
+                , Parser.char '"' $> "\""
+                , consumeNonParens
+                ]
+              ]
         let arguments = mconcat <$> sequenceA
               [ Parser.char '(' $> "("
               , consumeNonParens
@@ -338,7 +399,7 @@ parser = do
         Parser.skipSpace
         Parser.char '='
         Parser.skipSpace
-        syscallReturn <- decodeUtf8 <$> Parser.takeWhile Parser.isDigit
+        syscallReturn <- Text.pack <$> Parser.many' Parser.anyChar
         pure Syscall{..}
     , StraceExit <$> do
         Parser.string "+++ "
