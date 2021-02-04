@@ -43,8 +43,6 @@ main = Tasty.defaultMain $
             ] []
           batchInserts <- generate $ QuickCheck.vector 100
           for_ batchInserts $ \BatchInsert{..} -> do
-            putStrLn $ "batchInsertVarLimit = " <> show batchInsertVarLimit
-            putStrLn $ "batchInsertRows = " <> show batchInsertRows
             batchInsertInternal batchInsertVarLimit database
               "test" [ "one", "two", "three", "four", "five" ]
               batchInsertRows

@@ -70,7 +70,7 @@ main = Tasty.defaultMain $
           }
         )
     , HUnit.testCase "batchInsert" $ do -- TODO: Move this to test-common executable
-        withDatabase "tmp/test-batchInsert.sqlite" $ \database _ -> do
+        withDatabase "test-batchInsert.sqlite" $ \database _ -> do
           executeStatements database [[ "CREATE TABLE IF NOT EXISTS test (a INTEGER, b TEXT, c TEXT);" ]]
           let rows =
                 [ [ SQLInteger 1, SQLText "A", SQLText "B" ]

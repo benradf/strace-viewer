@@ -8,7 +8,7 @@ module Strace
   , Syscall(..)
   , Signal(..)
   , Exit(..)
-  , test
+  , load
   , parser
   ) where
 
@@ -17,8 +17,9 @@ import qualified Data.Attoparsec.ByteString.Char8 as Parser
 import Data.ByteString.Char8 (unpack)
 import qualified Data.ByteString.Char8 as ByteString
 import Data.Either (fromLeft, fromRight)
-import Data.Functor (($>), void)
+import Data.Functor (($>), (<&>))
 import Data.Int (Int64)
+import Data.Maybe (mapMaybe)
 import Data.Set (Set)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -27,7 +28,7 @@ import Data.Time.Format (defaultTimeLocale, parseTimeM)
 import Data.Time.Format.ISO8601 (iso8601Show)
 import Data.Time.LocalTime (TimeOfDay)
 import Data.Traversable (for)
-import Database.SQLite3 (Database, SQLData(..), lastInsertRowId)
+import Database.SQLite3 (Database, SQLData(..))
 import Http.Server
 import qualified Sqlite
 import Sqlite hiding (withDatabase)
@@ -83,213 +84,55 @@ data Context = Context
   }
   deriving Show
 
-test :: IO ()
-test = withDatabase "/tmp/strace.sqlite" $ \database _ -> do
+{-
+    docker exec -it $(docker ps -q | head -1) bash -c "
+      while true; do
+        rm -fv tmp/strace.sqlite
+        sqlite3 tmp/strace.sqlite
+      done
+    "
+-}
+
+load :: IO ()
+load = withDatabase "/tmp/strace.sqlite" $ \database _ -> do
   loadLogs >>= \case
     Left e -> error e
-    Right entries -> for entries $ \case
-      StraceExit exit@Exit{..} -> do
-        void $ executeSql database
-          [ "INSERT INTO exit (time, pid, code, signal)"
-          , "VALUES (?, ?, ?, ?);" ]
-          [ SQLText $ Text.pack $ iso8601Show exitTime
-          , SQLInteger $ fromIntegral exitPid
-          , maybe SQLNull SQLInteger exitCode
-          , maybe SQLNull SQLText exitSignal
-          ]
-      StraceSyscall syscall@Syscall{..} -> do
-        -- TODO: Consider batching inserts because the following is extremely inefficient.
-        executeSql database
-          [ "INSERT INTO syscall (pid, time, name, args, return)"
-          , "VALUES (?, ?, ?, ?, ?);" ]
+    Right entries -> do
+      let filterEntries = flip mapMaybe entries
+      let syscalls = filterEntries $ \case
+            StraceSyscall syscall -> Just syscall
+            _ -> Nothing
+          signals = filterEntries $ \case
+            StraceSignal signal -> Just signal
+            _ -> Nothing
+          exits = filterEntries $ \case
+            StraceExit exit -> Just exit
+            _ -> Nothing
+      batchInsert database "syscall" [ "pid", "time", "name", "args", "return" ] $
+        syscalls <&> \Syscall{..} ->
           [ SQLInteger $ fromIntegral syscallPid
           , SQLText $ Text.pack $ iso8601Show syscallTime
           , SQLText syscallName
           , SQLText syscallArgs
           , SQLText syscallReturn
           ]
-        id <- lastInsertRowId database
-        case syscallName of
-        {- TODO: Populate the clone and execve tables with:
-                  INSERT INTO clone (id, child_pid)
-                  SELECT id, return FROM syscall
-                  WHERE name = 'clone';
-          So are these tables really necessary at all?
-          Should probably get rid of them.
-        -}
---          "clone" -> void $ executeSql database
---            [ "INSERT INTO clone (id, child_pid)"
---            , "VALUES (?, ?);" ]
---            [ SQLInteger id
---            , SQLInteger $ read $ Text.unpack syscallReturn
---            ]
---          "execve" -> pure ()
-          _ -> pure ()
-      _ -> pure ()
---  executeSql database
---    [ "INSERT INTO context (name, start, end, hidden, syscalls)"
---    , "SELECT name, start, end, hidden, syscalls FROM context"
---    , "WHERE id = ?;" ] [ SQLInteger id ]  -- TODO: Handle 404 not found
---  let time = "2021-01-31T16:24:00.069705975Z"
---  executeStatements database $ pure <$>
---    [ "insert or replace into context_end (id, time) values (1, \"" <> time <> "\"), (2, \"" <> time <> "\");"
---    , "insert or replace into context_start (id, time) values (2, \"" <> time <> "\"), (3, \"" <> time <> "\");"
---    , "insert or replace into context (id) values (1), (2), (3);"
---    , "insert or replace into named_context (name, id) values (\"foo\", 1), (\"bar\", 2);"
---    ]
---  --putStrLn . show =<< getContextByName database "foo"
-  pure ()
-
-
-{-
-withNamedContext :: Database -> ContextName -> (Context -> IO a) -> IO a
-withNamedContext database name action = do
-  context <- getContextByName database name
-  action =<< case context of
-    Just context -> pure context
-    Nothing -> do
-      SQLInteger nextId <- executeSqlScalar database
-        [ "SELECT MAX(id) + 1 FROM context;" ] []
-      executeSql database
-        [ "INSERT INTO context (id) VALUES (?);"
-        ] [ SQLInteger nextId ]
-      executeSql database
-        [ "INSERT INTO named_context (name, id) VALUES (?, ?);"
-        ] [ SQLText name, SQLInteger nextId ]
-      pure $ Context
-        { contextId = nextId
-        , contextName = Just name
-        , contextStart = Nothing
-        , contextEnd = Nothing
-        , contextHidden = Set.empty
-        , contextSyscalls = Set.empty
-        }
-
-withCloneContext :: Database -> ContextId -> (Context -> IO a) -> IO (Maybe a)
-withCloneContext database id action = loadContext database id >>= \case
-  Nothing -> pure Nothing
-  Just Context{..} -> do
-    undefined
-
-saveContext :: Database -> Context -> IO ()
-saveContext database Context{..} = do
-  maybeReplace "named_context" "name" contextName
-  maybeReplace "context_start" "time" (packTime <$> contextStart)
-  maybeReplace "context_end" "time" (packTime <$> contextEnd)
-  where
-    packTime = Text.pack . iso8601Show
-    maybeReplace table column value = void $ sequenceA $ executeSql database
-      [ "INSERT OR REPLACE INTO" <> table <> " (id, " <> column <> ")"
-      , "VALUES (?, ?);" ] <$> sequenceA
-      [ Just $ SQLInteger contextId
-      , SQLText <$> value
-      ]
---    saveSet table column values = for_ values $ \value ->
---      executeSql database
-
--- TODO: Continue from here. Need to think a little more about Context model and updates to it.
-
-    
-
-getContextByName :: Database -> ContextName -> IO (Maybe Context)
-getContextByName database name = do
-  result <- executeSql database
-    [ "SELECT id FROM named_context"
-    , "WHERE name = ?;" ] [ SQLText name ]
-  case result of
-    [ [ SQLInteger id ] ] -> loadContext database id
-    [] -> pure Nothing
-
-loadContext :: Database -> ContextId -> IO (Maybe Context)
-loadContext database id = do
-  hidden <- executeSql database
-    [ "SELECT pid FROM context_hide"
-    , "WHERE id = ?;" ] [ SQLInteger id ]
-    <&> map (\[ SQLInteger pid ] -> fromIntegral pid)
-  syscalls <- executeSql database
-    [ "SELECT syscall FROM context_syscall"
-    , "WHERE id = ?;" ] [ SQLInteger id ]
-    <&> map (\[ SQLText syscall ] -> syscall)
-  result <- executeSql database
-    [ "SELECT * FROM context"
-    , "LEFT JOIN named_context USING (id)"
-    , "LEFT JOIN context_start USING (id)"
-    , "LEFT JOIN context_end USING (id)"
-    , "WHERE id = ?;" ] [ SQLInteger id ]
-  pure $ case result of
-    [ [ _, name, start, end ] ] ->
-      let contextId = id
-          contextName = fromSQLText name
-          contextStart = parseTime <$> fromSQLText start
-          contextEnd = parseTime <$> fromSQLText end
-          contextHidden = Set.fromList hidden
-          contextSyscalls = Set.fromList syscalls
-      in Just $ Context{..}
-    [] -> Nothing
-  where
-    parseTime = fromJust . iso8601ParseM . Text.unpack
-
-updateContext :: Database -> ContextId -> Query -> IO ContextId
-updateContext database id query = do
-  executeSql database
-    [ "INSERT INTO context (name, start, end, hidden, syscalls)"
-    , "SELECT name, start, end, hidden, syscalls FROM context"
-    , "WHERE id = ?;" ] [ SQLInteger id ]  -- TODO: Handle 404 not found
-  id <- lastInsertRowId database
-  let keys = [ "name", "start", "end", "hidden", "syscalls" ]
-      value = join . (Map.fromList query !?)
-      values = value <$> keys
-      column key = value key $> key
-      columns = column <$> keys
-      param key = value key $> "?"
-      params = param <$> keys
-  if null columns
-    then error "400"
-    else error "to be continued"
-    
-  executeSql database
-    [ "UPDATE context SET"
-    ] []
-  
-  pure id
--}
-
-{-
-
-    POST /strace      -- Creates a default context with a unique name (id is returned in body)
-    POST /strace/111?start=a&hidden=b,c         -- Clones from 111 and then updates clone with query params
-    POST /strace/123?end=d                      -- Clones from 123 then updates clone with query params
-    POST /strace/456?name=foo                   -- Clone 456 and name the clone foo (can be used to set current too)
-
-    All above requests return new id in body
-
-    GET /strace/123             -- Renders svg render of context 123
-
-    GET /strace       -- Links for names of contexts in most recently modified (max id) order
-
-
-
-TO BE CONTINUED: Design data model around the following REST interface:
-
-    GET /strace                       Returns html with links to `/strace/{id}`
-    GET /strace/{id}                  Returns rendered svg with embedded javascript to POST and navigate to new context
-    POST /strace                      Returns id of new context with unique name
-    POST /strace/{id}?name={name}&start={start}&end={end}&hidden={hidden}&syscalls={syscalls}
-                                      Clones id and sets the provided query params (all optional)
-
-
-    GET /strace
-    GET /strace?name={name}&start={start} ...
-
--}
+      batchInsert database "signal" [ "time", "pid", "type" ] $
+        signals <&> \Signal{..} ->
+          [ SQLText $ Text.pack $ iso8601Show signalTime
+          , SQLInteger $ fromIntegral signalPid
+          , SQLText signalType
+          ]
+      batchInsert database "exit" [ "time", "pid", "code", "signal" ] $
+        exits <&> \Exit{..} ->
+          [ SQLText $ Text.pack $ iso8601Show exitTime
+          , SQLInteger $ fromIntegral exitPid
+          , maybe SQLNull SQLInteger exitCode
+          , maybe SQLNull SQLText exitSignal
+          ]
 
 route :: Application
 route method request = do
-  -- TODO: Render based on context from query params
-  error "not implemented"
-
---contextual :: String -> (Context
-
+  error "not implemented"  -- TODO: Render based on context from query params
 
 withDatabase :: FilePath -> (Database -> IO () -> IO ()) -> IO ()
 withDatabase path application = Sqlite.withDatabase path $
@@ -353,7 +196,6 @@ loadLogs = do
     results <- for lines $ \line ->
       pure (Parser.parseOnly parser line) -- `finally` ByteString.putStrLn line
     pure $ sequenceA results
-
 
 data StraceEntry
   = StraceSyscall Syscall
@@ -459,5 +301,180 @@ parser = do
 12:50:22.839383 execve("/bin/ssh-keygen", ["/bin/ssh-keygen", "-A"], 0x94f4d0 /* 7 vars */) = 0
 12:50:22.840079 brk(NULL)               = 0x556e643d6000
 12:50:22.840164 access("/etc/ld-nix.so.preload", R_OK) = -1 ENOENT (No such file or directory)
+
+-}
+
+
+
+
+
+
+          {- TODO: Populate the clone and execve tables with:
+                    INSERT INTO clone (id, child_pid)
+                    SELECT id, return FROM syscall
+                    WHERE name = 'clone';
+            So are these tables really necessary at all?
+            Should probably get rid of them.
+          -}
+  --          "clone" -> void $ executeSql database
+  --            [ "INSERT INTO clone (id, child_pid)"
+  --            , "VALUES (?, ?);" ]
+  --            [ SQLInteger id
+  --            , SQLInteger $ read $ Text.unpack syscallReturn
+  --            ]
+  --          "execve" -> pure ()
+--  executeSql database
+--    [ "INSERT INTO context (name, start, end, hidden, syscalls)"
+--    , "SELECT name, start, end, hidden, syscalls FROM context"
+--    , "WHERE id = ?;" ] [ SQLInteger id ]  -- TODO: Handle 404 not found
+--  let time = "2021-01-31T16:24:00.069705975Z"
+--  executeStatements database $ pure <$>
+--    [ "insert or replace into context_end (id, time) values (1, \"" <> time <> "\"), (2, \"" <> time <> "\");"
+--    , "insert or replace into context_start (id, time) values (2, \"" <> time <> "\"), (3, \"" <> time <> "\");"
+--    , "insert or replace into context (id) values (1), (2), (3);"
+--    , "insert or replace into named_context (name, id) values (\"foo\", 1), (\"bar\", 2);"
+--    ]
+--  --putStrLn . show =<< getContextByName database "foo"
+
+
+{-
+withNamedContext :: Database -> ContextName -> (Context -> IO a) -> IO a
+withNamedContext database name action = do
+  context <- getContextByName database name
+  action =<< case context of
+    Just context -> pure context
+    Nothing -> do
+      SQLInteger nextId <- executeSqlScalar database
+        [ "SELECT MAX(id) + 1 FROM context;" ] []
+      executeSql database
+        [ "INSERT INTO context (id) VALUES (?);"
+        ] [ SQLInteger nextId ]
+      executeSql database
+        [ "INSERT INTO named_context (name, id) VALUES (?, ?);"
+        ] [ SQLText name, SQLInteger nextId ]
+      pure $ Context
+        { contextId = nextId
+        , contextName = Just name
+        , contextStart = Nothing
+        , contextEnd = Nothing
+        , contextHidden = Set.empty
+        , contextSyscalls = Set.empty
+        }
+
+withCloneContext :: Database -> ContextId -> (Context -> IO a) -> IO (Maybe a)
+withCloneContext database id action = loadContext database id >>= \case
+  Nothing -> pure Nothing
+  Just Context{..} -> do
+    undefined
+
+saveContext :: Database -> Context -> IO ()
+saveContext database Context{..} = do
+  maybeReplace "named_context" "name" contextName
+  maybeReplace "context_start" "time" (packTime <$> contextStart)
+  maybeReplace "context_end" "time" (packTime <$> contextEnd)
+  where
+    packTime = Text.pack . iso8601Show
+    maybeReplace table column value = void $ sequenceA $ executeSql database
+      [ "INSERT OR REPLACE INTO" <> table <> " (id, " <> column <> ")"
+      , "VALUES (?, ?);" ] <$> sequenceA
+      [ Just $ SQLInteger contextId
+      , SQLText <$> value
+      ]
+--    saveSet table column values = for_ values $ \value ->
+--      executeSql database
+
+-- TODO: Continue from here. Need to think a little more about Context model and updates to it.
+
+
+
+getContextByName :: Database -> ContextName -> IO (Maybe Context)
+getContextByName database name = do
+  result <- executeSql database
+    [ "SELECT id FROM named_context"
+    , "WHERE name = ?;" ] [ SQLText name ]
+  case result of
+    [ [ SQLInteger id ] ] -> loadContext database id
+    [] -> pure Nothing
+
+loadContext :: Database -> ContextId -> IO (Maybe Context)
+loadContext database id = do
+  hidden <- executeSql database
+    [ "SELECT pid FROM context_hide"
+    , "WHERE id = ?;" ] [ SQLInteger id ]
+    <&> map (\[ SQLInteger pid ] -> fromIntegral pid)
+  syscalls <- executeSql database
+    [ "SELECT syscall FROM context_syscall"
+    , "WHERE id = ?;" ] [ SQLInteger id ]
+    <&> map (\[ SQLText syscall ] -> syscall)
+  result <- executeSql database
+    [ "SELECT * FROM context"
+    , "LEFT JOIN named_context USING (id)"
+    , "LEFT JOIN context_start USING (id)"
+    , "LEFT JOIN context_end USING (id)"
+    , "WHERE id = ?;" ] [ SQLInteger id ]
+  pure $ case result of
+    [ [ _, name, start, end ] ] ->
+      let contextId = id
+          contextName = fromSQLText name
+          contextStart = parseTime <$> fromSQLText start
+          contextEnd = parseTime <$> fromSQLText end
+          contextHidden = Set.fromList hidden
+          contextSyscalls = Set.fromList syscalls
+      in Just $ Context{..}
+    [] -> Nothing
+  where
+    parseTime = fromJust . iso8601ParseM . Text.unpack
+
+updateContext :: Database -> ContextId -> Query -> IO ContextId
+updateContext database id query = do
+  executeSql database
+    [ "INSERT INTO context (name, start, end, hidden, syscalls)"
+    , "SELECT name, start, end, hidden, syscalls FROM context"
+    , "WHERE id = ?;" ] [ SQLInteger id ]  -- TODO: Handle 404 not found
+  id <- lastInsertRowId database
+  let keys = [ "name", "start", "end", "hidden", "syscalls" ]
+      value = join . (Map.fromList query !?)
+      values = value <$> keys
+      column key = value key $> key
+      columns = column <$> keys
+      param key = value key $> "?"
+      params = param <$> keys
+  if null columns
+    then error "400"
+    else error "to be continued"
+
+  executeSql database
+    [ "UPDATE context SET"
+    ] []
+
+  pure id
+-}
+
+{-
+
+    POST /strace      -- Creates a default context with a unique name (id is returned in body)
+    POST /strace/111?start=a&hidden=b,c         -- Clones from 111 and then updates clone with query params
+    POST /strace/123?end=d                      -- Clones from 123 then updates clone with query params
+    POST /strace/456?name=foo                   -- Clone 456 and name the clone foo (can be used to set current too)
+
+    All above requests return new id in body
+
+    GET /strace/123             -- Renders svg render of context 123
+
+    GET /strace       -- Links for names of contexts in most recently modified (max id) order
+
+
+
+TO BE CONTINUED: Design data model around the following REST interface:
+
+    GET /strace                       Returns html with links to `/strace/{id}`
+    GET /strace/{id}                  Returns rendered svg with embedded javascript to POST and navigate to new context
+    POST /strace                      Returns id of new context with unique name
+    POST /strace/{id}?name={name}&start={start}&end={end}&hidden={hidden}&syscalls={syscalls}
+                                      Clones id and sets the provided query params (all optional)
+
+
+    GET /strace
+    GET /strace?name={name}&start={start} ...
 
 -}
