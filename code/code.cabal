@@ -29,6 +29,38 @@ library
   hs-source-dirs:
     common
 
+executable test-common
+  default-language: Haskell2010
+  main-is: Main.hs
+  build-depends:
+    QuickCheck,
+    attoparsec,
+    base,
+    bytestring,
+    containers,
+    direct-sqlite,
+    http-client,
+    http-types,
+    mtl,
+    process,
+    time,
+    tasty,
+    tasty-hunit,
+    tasty-quickcheck,
+    temporary,
+    text,
+    transformers,
+    unix,
+    wai
+  ghc-options:
+    -fwarn-unused-imports
+  hs-source-dirs:
+    test-common
+    common
+  other-modules:
+    Log
+    Sqlite
+
 executable log-view
   default-language: Haskell2010
   main-is: Main.hs
