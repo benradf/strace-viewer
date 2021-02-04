@@ -1,4 +1,5 @@
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 module Sqlite
   ( withDatabase
@@ -6,11 +7,14 @@ module Sqlite
   , executeSql
   , executeSqlScalar
   , executeStatements
+  , batchInsert
   , fromSQLInteger
   , fromSQLText
   ) where
 
 import Control.Exception (bracket)
+import Control.Monad (when)
+import Data.Bifunctor (first)
 import Data.Foldable (for_)
 import Data.Int (Int64)
 import Data.Text (Text)
@@ -39,7 +43,7 @@ executeSql database sql params =
     log ansiMagenta $ Text.unpack $ Text.unwords sql
     log ansiMagenta $ "? " <> show params
     SQLite3.bind statement params
-    let fetch = SQLite3.step statement >>= \case
+    let fetch = SQLite3.stepNoCB statement >>= \case
           Row -> (:) <$> SQLite3.columns statement <*> fetch
           Done -> pure []
     results <- fetch
@@ -53,6 +57,45 @@ executeSqlScalar database sql params = do
 
 executeStatements :: Database -> [[Text]] -> IO ()
 executeStatements database statements = for_ statements $ flip (executeSql database) []
+
+-- TODO: Add test-common executable with a test for `batchInsert`.
+-- Also consider using a list of fixed sized vector instead of `[[SQLData]]`.
+-- Need to test all the edge cases around remainders.
+batchInsert :: Database -> Text -> [Text] -> [[SQLData]] -> IO ()
+batchInsert database table columns rows = do
+  let columnCount = length columns
+  let rowCount = length rows
+  --let batchSize = 32766 / columnCount
+  let batchSize = 10 `div` columnCount
+  let (batchCount, remainderCount) = rowCount `divMod` batchSize
+  let commaSep n = Text.intercalate ", " . replicate n
+  let withInsertRows n f = flip (withStatement database) f $ Text.unlines
+        [ "INSERT INTO " <> table <> "(" <> Text.intercalate ", " columns <> ")"
+        , "VALUES " <> n `commaSep` ("(" <> columnCount `commaSep` "?"  <> ")") ]
+  let split :: [a] -> ([[a]], [a])
+      split xs = case splitAt batchSize xs of
+        (ys, xs')
+          | length xs' > batchSize -> first (ys :) (split xs')
+          | length xs' < batchSize -> ([ ys ], xs')
+          | otherwise -> ([ ys, xs' ], [])
+      insert values statement = do
+        SQLite3.bind statement values
+        Done <- SQLite3.stepNoCB statement
+        SQLite3.reset statement
+      (batches, remainder) = split rows
+  when (length batches > 0) $ withInsertRows batchSize $ \statement ->
+    for_ batches $ \batch -> insert (concat batch) statement
+  when (length remainder > 0) $ withInsertRows (length remainder) $
+    insert $ concat remainder
+
+-- col count 300
+-- row count 8
+-- total values 2400
+-- batchSize 3
+-- batchSize * columnCount = 900    (values per batch)
+-- 2 regular batches of 3 rows
+-- 1 remainder batch of 2 rows
+  --withStatement database sql $ batch $ concat rows
 
 fromSQLInteger :: SQLData -> Maybe Int64
 fromSQLInteger = \case
