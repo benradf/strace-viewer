@@ -4,8 +4,6 @@ module Main where
 
 import qualified Data.Attoparsec.ByteString.Char8 as Parser
 import Data.Time.LocalTime (TimeOfDay(..))
-import Database.SQLite3 (SQLData(..))
-import Sqlite
 import Strace
 import qualified Test.Tasty as Tasty
 import qualified Test.Tasty.HUnit as HUnit
@@ -69,17 +67,6 @@ main = Tasty.defaultMain $
           , exitSignal = Nothing
           }
         )
-    , HUnit.testCase "batchInsert" $ do -- TODO: Move this to test-common executable
-        withDatabase "test-batchInsert.sqlite" $ \database _ -> do
-          executeStatements database [[ "CREATE TABLE IF NOT EXISTS test (a INTEGER, b TEXT, c TEXT);" ]]
-          let rows =
-                [ [ SQLInteger 1, SQLText "A", SQLText "B" ]
-                , [ SQLInteger 2, SQLText "C", SQLText "D" ]
-                , [ SQLInteger 3, SQLText "E", SQLText "F" ]
-                , [ SQLInteger 4, SQLText "G", SQLText "H" ]
-                ]
-          batchInsert database "test" [ "a", "b", "c" ] rows
-          HUnit.assertEqual "" rows =<< executeSql database [ "SELECT * FROM test;" ] []
     ]
   where
     assertParse string expected =

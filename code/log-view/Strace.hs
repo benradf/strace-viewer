@@ -62,6 +62,34 @@ data Exit = Exit
 
 ---
 
+{-
+    # Processes that started after strace began recording:
+    sqlite3 /tmp/strace.sqlite "
+      SELECT COUNT(DISTINCT(process.pid))
+      FROM syscall AS process
+      LEFT JOIN syscall AS clone
+      ON clone.name = 'clone'
+      AND clone.return = process.pid
+      WHERE clone.return IS NOT NULL; -- there exists a clone() call that produced this process
+    "
+
+    # Processes that were already running when strace began recording:
+    sqlite3 /tmp/strace.sqlite "
+      SELECT COUNT(DISTINCT(process.pid))
+      FROM syscall AS process
+      LEFT JOIN syscall AS clone
+      ON clone.name = 'clone'
+      AND clone.return = process.pid
+      WHERE clone.return IS NULL; -- no clone() call produced this process (already running)
+    "
+
+
+    sqlite3 /tmp/strace.sqlite "select return from syscall where name = 'clone' and pid = 32;"
+-}
+
+-- IDEA: Could create a test that diffs the topological layout of the strace visualization.
+-- This would allow the slightest change to which processes start and their order to be noticed.
+
 data Process = Process
   { processId :: ProcessID
   , processStart :: Maybe TimeOfDay

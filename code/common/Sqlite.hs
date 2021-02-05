@@ -61,7 +61,7 @@ executeStatements database statements = for_ statements $ flip (executeSql datab
 
 -- Consider using a list of fixed sized vector instead of `[[SQLData]]`.
 batchInsert :: Database -> Text -> [Text] -> [[SQLData]] -> IO ()
-batchInsert = batchInsertInternal 32766
+batchInsert = batchInsertInternal 999 -- 32766
 
 batchInsertInternal :: Int -> Database -> Text -> [Text] -> [[SQLData]] -> IO ()
 batchInsertInternal varLimit database table columns rows = do
