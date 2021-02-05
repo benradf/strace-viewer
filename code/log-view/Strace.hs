@@ -19,13 +19,15 @@ import qualified Data.ByteString.Char8 as ByteString
 import Data.Either (fromLeft, fromRight)
 import Data.Functor (($>), (<&>))
 import Data.Int (Int64)
+import Data.List (sortBy)
 import Data.Maybe (mapMaybe)
+import Data.Ord (comparing)
 import Data.Set (Set)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Text.Encoding (decodeUtf8)
 import Data.Time.Format (defaultTimeLocale, parseTimeM)
-import Data.Time.Format.ISO8601 (iso8601Show)
+import Data.Time.Format.ISO8601 (iso8601ParseM, iso8601Show)
 import Data.Time.LocalTime (TimeOfDay)
 import Data.Traversable (for)
 import Database.SQLite3 (Database, SQLData(..))
@@ -65,27 +67,94 @@ data Exit = Exit
 {-
     # Processes that started after strace began recording:
     sqlite3 /tmp/strace.sqlite "
-      SELECT COUNT(DISTINCT(process.pid))
-      FROM syscall AS process
-      LEFT JOIN syscall AS clone
-      ON clone.name = 'clone'
-      AND clone.return = process.pid
-      WHERE clone.return IS NOT NULL; -- there exists a clone() call that produced this process
+-}
+nonRoots :: Database -> IO [[SQLData]]
+nonRoots database = executeSql database
+  [ "SELECT COUNT(DISTINCT(process.pid))"
+  , "FROM syscall AS process"
+  , "LEFT JOIN syscall AS clone"
+  , "ON clone.name = 'clone'"
+  , "AND clone.return = process.pid"
+  , "WHERE clone.return IS NOT NULL;"
+  ] []
+{-
     "
 
     # Processes that were already running when strace began recording:
     sqlite3 /tmp/strace.sqlite "
-      SELECT COUNT(DISTINCT(process.pid))
-      FROM syscall AS process
-      LEFT JOIN syscall AS clone
-      ON clone.name = 'clone'
-      AND clone.return = process.pid
-      WHERE clone.return IS NULL; -- no clone() call produced this process (already running)
+-}
+rootProcesses :: Database -> IO [[SQLData]]
+rootProcesses database = executeSql database
+  [ "SELECT DISTINCT(process.pid)"
+  , "FROM syscall AS process"
+  , "LEFT JOIN syscall AS clone"
+  , "ON clone.name = 'clone'"
+  , "AND clone.return = process.pid"
+  , "WHERE clone.return IS NULL;"
+  ] []
+{-
     "
 
 
     sqlite3 /tmp/strace.sqlite "select return from syscall where name = 'clone' and pid = 32;"
 -}
+
+processes :: Database -> [[SQLData]] -> IO [Process]
+processes database = traverse $ \[ SQLInteger pid ] -> do
+  let parseTimes :: (TimeOfDay -> a) -> [[SQLData]] -> [a]
+      parseTimes f = map $ \[ SQLText time ] ->
+        case iso8601ParseM $ Text.unpack time of
+          Nothing -> error "parse time failed"
+          Just time -> f time
+      processId = fromIntegral pid
+  startTimes <- parseTimes Left <$> executeSql database
+    [ "SELECT time FROM syscall WHERE name = 'clone' and return = ?;"
+    ] [ SQLText $ Text.pack $ show pid ]
+  endTimes <- parseTimes Right <$> executeSql database
+    [ "SELECT time FROM exit WHERE pid"
+    ] []
+  let times = flip sortBy (startTimes <> endTimes) $ comparing $ \case
+        Left time -> time
+        Right time -> time
+  let spans = flip foldMap times $ Spans . \case
+        Left time -> pure (Just time, Nothing)
+        Right time -> pure (Nothing, Just time)
+
+
+  pure Process{..}
+
+data Spans a = Spans [(Maybe a, Maybe a)]
+
+instance Show a => Semigroup (Spans a) where
+  (<>) = curry $ \case
+    (Spans [], rhs) -> rhs
+    (lhs, Spans []) -> lhs
+    (Spans lhs, Spans rhs) -> case (last lhs, head rhs) of
+      ((Just start, Nothing), (Nothing, Just end)) -> Spans $ init lhs <> [(Just start, Just end)] <> tail rhs
+      ((Nothing, Just end), (Just start, Nothing)) -> Spans $ lhs <> rhs
+      _ -> error $ "overlapping spans: " <> show lhs <> " <> " <> show rhs
+
+instance Show a => Monoid (Spans a) where
+  mempty = Spans []
+
+{-
+
+      
+-}
+
+--    e   s   e      s   e       s e
+
+processForest :: Database -> Context -> IO [Process]
+processForest database Context{..} = do
+  executeSql database
+    [ "SELECT DISTINCT(process.pid)"
+    , "FROM syscall AS process"
+    , "LEFT JOIN syscall AS clone"
+    , "ON clone.name = 'clone'"
+    , "AND clone.return = process.pid"
+    , "WHERE clone.return IS NULL;"
+    ] []
+  undefined
 
 -- IDEA: Could create a test that diffs the topological layout of the strace visualization.
 -- This would allow the slightest change to which processes start and their order to be noticed.
@@ -94,9 +163,10 @@ data Process = Process
   { processId :: ProcessID
   , processStart :: Maybe TimeOfDay
   , processEnd :: Maybe TimeOfDay
-  , processSyscalls :: [Syscall]
+  , processSyscalls :: Context -> IO [Syscall]
+  , processChildren :: Context -> IO [Process]
   }
-  deriving Show
+  --deriving Show
 
 type ContextId = Int64
 
@@ -107,7 +177,7 @@ data Context = Context
   , contextName :: Maybe ContextName
   , contextStart :: Maybe TimeOfDay
   , contextEnd :: Maybe TimeOfDay
-  , contextHidden :: Set ProcessID
+  , contextVisible :: Set ProcessID  -- TODO: Think through how show and hiding processes should work exactly.
   , contextSyscalls :: Set Text
   }
   deriving Show
@@ -177,7 +247,7 @@ createSchema database = executeStatements database
     , "  name TEXT,"
     , "  args TEXT,"
     , "  return TEXT,"
-    , "  PRIMARY KEY (id)"
+    , "  PRIMARY KEY (id)"  -- TODO: Get rid of `id` and also clone and execve tables. They are not needed.
     , ");"
     ]
   , [ "CREATE TABLE IF NOT EXISTS clone ("
