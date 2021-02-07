@@ -67,6 +67,21 @@ main = Tasty.defaultMain $
           , exitSignal = Nothing
           }
         )
+    , HUnit.testCase "Spans" $ withDatabase "testSpans.sqlite" $ \database _ -> do
+        let start t = StraceSyscall $ Syscall 0 (read t) "clone" "" "1"
+            end t = StraceExit $ Exit 1 (read t) (Just 0) Nothing
+        insert database
+          [ start "12:58:35", end "13:10:00"
+          , start "14:00:00", end "16:00:00"
+          , start "19:30:00", end "19:45:00"
+          ]
+        ps <- processes database [ 1 ]
+        insert database
+          [ end "12:00:00"
+          , start "20:00:00"
+          ]
+        ps <- processes database [ 1 ]
+        pure ()
     ]
   where
     assertParse string expected =

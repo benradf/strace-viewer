@@ -11,13 +11,21 @@ module Sqlite
   , batchInsertInternal
   , fromSQLInteger
   , fromSQLText
+  , sqlet
+  , maybeSqlet
+  , executeSqlets
   ) where
 
 import Control.Exception (bracket)
 import Control.Monad (when)
+import Control.Monad.Trans.Writer (Writer(..), runWriter, tell)
 import Data.Bifunctor (first)
+import Data.Coerce (coerce)
 import Data.Foldable (for_)
+import Data.Functor (($>))
 import Data.Int (Int64)
+import Data.Monoid (Ap(..))
+import Data.String (IsString(..))
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Database.SQLite3 (Database, SQLData(..), Statement, StepResult(..))
@@ -90,20 +98,6 @@ batchInsertInternal varLimit database table columns rows = do
   when (length remainder > 0) $ withInsertRows (length remainder) $
     insert $ concat remainder
 
---  putStrLn $ "columnCount = " <> show (columnCount)
---  putStrLn $ "rowCount = " <> show (rowCount)
---  putStrLn $ show (length batches) <> " batches with " <> show (batchSize)
---    <> " rows and a remainder of " <> show (length remainder) <> " rows"
-
--- col count 300
--- row count 8
--- total values 2400
--- batchSize 3
--- batchSize * columnCount = 900    (values per batch)
--- 2 regular batches of 3 rows
--- 1 remainder batch of 2 rows
-  --withStatement database sql $ batch $ concat rows
-
 fromSQLInteger :: SQLData -> Maybe Int64
 fromSQLInteger = \case
   SQLInteger value -> Just value
@@ -113,3 +107,27 @@ fromSQLText :: SQLData -> Maybe Text
 fromSQLText = \case
   SQLText value -> Just value
   SQLNull -> Nothing
+
+newtype Sqlet = Sqlet (Writer [SQLData] Text)
+
+instance IsString Sqlet where
+  fromString = Sqlet . pure . Text.pack
+
+instance Semigroup Sqlet where
+  Sqlet lhs <> Sqlet rhs = Sqlet $ getAp $ Ap lhs <> pure " " <> Ap rhs
+
+instance Monoid Sqlet where
+  mempty = Sqlet $ pure ""
+
+sqlet :: Text -> SQLData -> Sqlet
+sqlet sql arg = Sqlet $ tell [ arg ] $> sql
+
+maybeSqlet :: Text -> Maybe SQLData -> Sqlet
+maybeSqlet sql = \case
+  Just arg -> sqlet sql arg
+  Nothing -> Sqlet $ pure ""
+
+executeSqlets :: Database -> [Sqlet] -> IO [[SQLData]]
+executeSqlets database sqlets =
+  let (sql, args) = runWriter $ coerce $ mconcat sqlets
+  in executeSql database [ sql ] args

@@ -2,6 +2,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE DeriveFoldable #-}
 
 module Strace
   ( StraceEntry(..)
@@ -9,7 +10,10 @@ module Strace
   , Signal(..)
   , Exit(..)
   , load
+  , insert
   , parser
+  , withDatabase
+  , processes
   ) where
 
 import Data.Attoparsec.ByteString.Char8 (Parser)
@@ -17,12 +21,14 @@ import qualified Data.Attoparsec.ByteString.Char8 as Parser
 import Data.ByteString.Char8 (unpack)
 import qualified Data.ByteString.Char8 as ByteString
 import Data.Either (fromLeft, fromRight)
+import Data.Foldable (for_)
 import Data.Functor (($>), (<&>))
 import Data.Int (Int64)
 import Data.List (sortBy)
-import Data.Maybe (mapMaybe)
+import Data.Maybe (fromJust, mapMaybe)
 import Data.Ord (comparing)
 import Data.Set (Set)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Text.Encoding (decodeUtf8)
@@ -99,39 +105,67 @@ rootProcesses database = executeSql database
     sqlite3 /tmp/strace.sqlite "select return from syscall where name = 'clone' and pid = 32;"
 -}
 
-processes :: Database -> [[SQLData]] -> IO [Process]
-processes database = traverse $ \[ SQLInteger pid ] -> do
+
+
+processes :: Database -> [ProcessID] -> IO [Process]
+processes database pids = fmap concat $ for pids $ \pid -> do
   let parseTimes :: (TimeOfDay -> a) -> [[SQLData]] -> [a]
       parseTimes f = map $ \[ SQLText time ] ->
         case iso8601ParseM $ Text.unpack time of
           Nothing -> error "parse time failed"
           Just time -> f time
-      processId = fromIntegral pid
   startTimes <- parseTimes Left <$> executeSql database
     [ "SELECT time FROM syscall WHERE name = 'clone' and return = ?;"
     ] [ SQLText $ Text.pack $ show pid ]
   endTimes <- parseTimes Right <$> executeSql database
-    [ "SELECT time FROM exit WHERE pid"
-    ] []
+    [ "SELECT time FROM exit WHERE pid = ?;"
+    ] [ SQLInteger $ fromIntegral pid ]
   let times = flip sortBy (startTimes <> endTimes) $ comparing $ \case
         Left time -> time
         Right time -> time
-  let spans = flip foldMap times $ Spans . \case
-        Left time -> pure (Just time, Nothing)
-        Right time -> pure (Nothing, Just time)
-
-
-  pure Process{..}
+      Spans spans = flip foldMap times $ Spans . pure . \case
+        Left time -> (Just time, Nothing)
+        Right time -> (Nothing, Just time)
+  for spans $ \(processStart, processEnd) ->
+    let showTime = SQLText . Text.pack . iso8601Show
+        syscallPid = fromIntegral pid
+        processId = syscallPid
+        processSyscalls Context{..} =
+          executeSqlets database
+            [ "SELECT time, name, args, return FROM syscall"
+            , sqlet "WHERE pid = ?" $ SQLInteger $ fromIntegral pid
+            , maybeSqlet "AND time >= ?" $ showTime <$> processStart
+            , maybeSqlet "AND time < ?" $ showTime <$> processEnd
+            , maybeSqlet "AND time >= ?" $ showTime <$> contextStart
+            , maybeSqlet "AND time < ?" $ showTime <$> contextEnd
+            , sqlet "AND (?" $ SQLInteger $ if Set.null contextSyscalls then 1 else 0
+            , flip foldMap contextSyscalls $ \name -> sqlet "OR name = ?" $ SQLText name
+            , ");" ] <&&> \
+              [ SQLText time
+              , SQLText syscallName
+              , SQLText syscallArgs
+              , SQLText syscallReturn
+              ] -> let syscallTime = fromJust $ iso8601ParseM $ Text.unpack time in Syscall{..}
+        processChildren Context{..} =  -- TODO: Figure out how to apply temporal context to filter this
+          processes database =<< (executeSqlets database
+            [ "SELECT DISTINCT(return)"
+            , "FROM syscall WHERE name = 'clone'"
+            , sqlet "AND pid = ?" $ SQLInteger $ fromIntegral pid
+            , flip foldMap contextHidden $ \p ->
+              sqlet "AND return != ?" $ SQLText $ Text.pack $ show p
+            , ";" ] <&&> \[ SQLText pid ] -> read $ Text.unpack pid)
+    in pure Process{..}
 
 data Spans a = Spans [(Maybe a, Maybe a)]
+  deriving Show
 
 instance Show a => Semigroup (Spans a) where
   (<>) = curry $ \case
     (Spans [], rhs) -> rhs
     (lhs, Spans []) -> lhs
     (Spans lhs, Spans rhs) -> case (last lhs, head rhs) of
+      ((_, Just end), (Just start, _)) -> Spans $ lhs <> rhs
       ((Just start, Nothing), (Nothing, Just end)) -> Spans $ init lhs <> [(Just start, Just end)] <> tail rhs
-      ((Nothing, Just end), (Just start, Nothing)) -> Spans $ lhs <> rhs
       _ -> error $ "overlapping spans: " <> show lhs <> " <> " <> show rhs
 
 instance Show a => Monoid (Spans a) where
@@ -144,17 +178,16 @@ instance Show a => Monoid (Spans a) where
 
 --    e   s   e      s   e       s e
 
+test = withDb $ \db -> do { context <- fullContext db; ps <- processForest db context; for_ ps $ \p -> do { putStr $ show (processId p) <> " -> "; putStrLn . show . map processId =<< processChildren p context } }
+
+rootPids = withDb $ \db -> putStrLn . show . map processId =<< processForest db =<< fullContext db
+
+withDb :: (Database -> IO ()) -> IO ()
+withDb action = withDatabase "/data/strace.sqlite" $ \database _ -> action database
+
 processForest :: Database -> Context -> IO [Process]
-processForest database Context{..} = do
-  executeSql database
-    [ "SELECT DISTINCT(process.pid)"
-    , "FROM syscall AS process"
-    , "LEFT JOIN syscall AS clone"
-    , "ON clone.name = 'clone'"
-    , "AND clone.return = process.pid"
-    , "WHERE clone.return IS NULL;"
-    ] []
-  undefined
+processForest database context@Context{..} =
+  processes database $ Set.toList contextRoots
 
 -- IDEA: Could create a test that diffs the topological layout of the strace visualization.
 -- This would allow the slightest change to which processes start and their order to be noticed.
@@ -177,10 +210,24 @@ data Context = Context
   , contextName :: Maybe ContextName
   , contextStart :: Maybe TimeOfDay
   , contextEnd :: Maybe TimeOfDay
-  , contextVisible :: Set ProcessID  -- TODO: Think through how show and hiding processes should work exactly.
-  , contextSyscalls :: Set Text
-  }
-  deriving Show
+  , contextRoots :: Set ProcessID
+  , contextHidden :: Set ProcessID  -- TODO: Think through how show and hiding processes should work exactly.
+  , contextSyscalls :: Set Text  -- empty -> all syscalls; otherwise -> inclusion filter
+  }                               --        1,2,3,-5,-8,-9,-11
+  deriving Show           -- Positive pids are roots, negative are processes to be hidden (and their children)
+    -- Start from roots, filter out negative pids from processChildren list
+
+fullContext :: Database -> IO Context
+fullContext database = do
+  let contextId = 0
+      contextName = Nothing
+      contextStart = Nothing
+      contextEnd = Nothing
+      contextHidden = Set.empty
+      contextSyscalls = Set.empty
+  contextRoots <- fmap Set.fromList $ rootProcesses database <&&>
+    \[ SQLInteger pid ] -> fromIntegral pid
+  pure Context{..}
 
 {-
     docker exec -it $(docker ps -q | head -1) bash -c "
@@ -195,38 +242,41 @@ load :: IO ()
 load = withDatabase "/tmp/strace.sqlite" $ \database _ -> do
   loadLogs >>= \case
     Left e -> error e
-    Right entries -> do
-      let filterEntries = flip mapMaybe entries
-      let syscalls = filterEntries $ \case
-            StraceSyscall syscall -> Just syscall
-            _ -> Nothing
-          signals = filterEntries $ \case
-            StraceSignal signal -> Just signal
-            _ -> Nothing
-          exits = filterEntries $ \case
-            StraceExit exit -> Just exit
-            _ -> Nothing
-      batchInsert database "syscall" [ "pid", "time", "name", "args", "return" ] $
-        syscalls <&> \Syscall{..} ->
-          [ SQLInteger $ fromIntegral syscallPid
-          , SQLText $ Text.pack $ iso8601Show syscallTime
-          , SQLText syscallName
-          , SQLText syscallArgs
-          , SQLText syscallReturn
-          ]
-      batchInsert database "signal" [ "time", "pid", "type" ] $
-        signals <&> \Signal{..} ->
-          [ SQLText $ Text.pack $ iso8601Show signalTime
-          , SQLInteger $ fromIntegral signalPid
-          , SQLText signalType
-          ]
-      batchInsert database "exit" [ "time", "pid", "code", "signal" ] $
-        exits <&> \Exit{..} ->
-          [ SQLText $ Text.pack $ iso8601Show exitTime
-          , SQLInteger $ fromIntegral exitPid
-          , maybe SQLNull SQLInteger exitCode
-          , maybe SQLNull SQLText exitSignal
-          ]
+    Right entries -> insert database entries
+
+insert :: Database -> [StraceEntry] -> IO ()
+insert database entries = do
+  let filterEntries = flip mapMaybe entries
+  let syscalls = filterEntries $ \case
+        StraceSyscall syscall -> Just syscall
+        _ -> Nothing
+      signals = filterEntries $ \case
+        StraceSignal signal -> Just signal
+        _ -> Nothing
+      exits = filterEntries $ \case
+        StraceExit exit -> Just exit
+        _ -> Nothing
+  batchInsert database "syscall" [ "pid", "time", "name", "args", "return" ] $
+    syscalls <&> \Syscall{..} ->
+      [ SQLInteger $ fromIntegral syscallPid
+      , SQLText $ Text.pack $ iso8601Show syscallTime
+      , SQLText syscallName
+      , SQLText syscallArgs
+      , SQLText syscallReturn
+      ]
+  batchInsert database "signal" [ "time", "pid", "type" ] $
+    signals <&> \Signal{..} ->
+      [ SQLText $ Text.pack $ iso8601Show signalTime
+      , SQLInteger $ fromIntegral signalPid
+      , SQLText signalType
+      ]
+  batchInsert database "exit" [ "time", "pid", "code", "signal" ] $
+    exits <&> \Exit{..} ->
+      [ SQLText $ Text.pack $ iso8601Show exitTime
+      , SQLInteger $ fromIntegral exitPid
+      , maybe SQLNull SQLInteger exitCode
+      , maybe SQLNull SQLText exitSignal
+      ]
 
 route :: Application
 route method request = do
