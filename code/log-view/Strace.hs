@@ -21,7 +21,7 @@ import qualified Data.Attoparsec.ByteString.Char8 as Parser
 import Data.ByteString.Char8 (unpack)
 import qualified Data.ByteString.Char8 as ByteString
 import Data.Either (fromLeft, fromRight)
-import Data.Foldable (for_)
+import Data.Foldable (for_, traverse_)
 import Data.Functor (($>), (<&>))
 import Data.Int (Int64)
 import Data.List (sortBy)
@@ -76,12 +76,9 @@ data Exit = Exit
 -}
 nonRoots :: Database -> IO [[SQLData]]
 nonRoots database = executeSql database
-  [ "SELECT COUNT(DISTINCT(process.pid))"
-  , "FROM syscall AS process"
-  , "LEFT JOIN syscall AS clone"
-  , "ON clone.name = 'clone'"
-  , "AND clone.return = process.pid"
-  , "WHERE clone.return IS NOT NULL;"
+  [ "SELECT pid FROM (SELECT DISTINCT(pid) as pid FROM syscall) as process"
+  , "LEFT JOIN (SELECT return FROM syscall WHERE name = 'clone') as clone"
+  , "ON process.pid = clone.return WHERE clone.return IS NOT NULL;"
   ] []
 {-
     "
@@ -91,13 +88,15 @@ nonRoots database = executeSql database
 -}
 rootProcesses :: Database -> IO [[SQLData]]
 rootProcesses database = executeSql database
-  [ "SELECT DISTINCT(process.pid)"
-  , "FROM syscall AS process"
-  , "LEFT JOIN syscall AS clone"
-  , "ON clone.name = 'clone'"
-  , "AND clone.return = process.pid"
-  , "WHERE clone.return IS NULL;"
+  [ "SELECT pid FROM (SELECT DISTINCT(pid) as pid FROM syscall) as process"
+  , "LEFT JOIN (SELECT return FROM syscall WHERE name = 'clone') as clone"
+  , "ON process.pid = clone.return WHERE clone.return IS NULL;"
   ] []
+
+-- 
+
+-- SELECT pid FROM (SELECT DISTINCT(pid) as pid FROM syscall) as process LEFT JOIN (SELECT return FROM syscall WHERE name = 'clone') as clone ON process.pid = clone.return WHERE clone.return IS NULL;
+
 {-
     "
 
@@ -126,7 +125,10 @@ processes database pids = fmap concat $ for pids $ \pid -> do
       Spans spans = flip foldMap times $ Spans . pure . \case
         Left time -> (Just time, Nothing)
         Right time -> (Nothing, Just time)
-  for spans $ \(processStart, processEnd) ->
+      spans2 = case spans of          -- }
+        [] -> [ (Nothing, Nothing) ]  -- } TODO: Do this more elegantly
+        _ -> spans                    -- }
+  for spans2 $ \(processStart, processEnd) ->
     let showTime = SQLText . Text.pack . iso8601Show
         syscallPid = fromIntegral pid
         processId = syscallPid
@@ -146,14 +148,21 @@ processes database pids = fmap concat $ for pids $ \pid -> do
               , SQLText syscallArgs
               , SQLText syscallReturn
               ] -> let syscallTime = fromJust $ iso8601ParseM $ Text.unpack time in Syscall{..}
-        processChildren Context{..} =  -- TODO: Figure out how to apply temporal context to filter this
-          processes database =<< (executeSqlets database
+        processChildren Context{..} = do
+          pids <- executeSqlets database
             [ "SELECT DISTINCT(return)"
-            , "FROM syscall WHERE name = 'clone'"
-            , sqlet "AND pid = ?" $ SQLInteger $ fromIntegral pid
+            , "FROM syscall LEFT JOIN exit"
+            , "ON syscall.return = exit.pid"
+            , "WHERE name = 'clone'"
+            , sqlet "AND syscall.pid = ?" $ SQLInteger $ fromIntegral pid
+            , maybeSqlet "AND syscall.time >= ?" $ showTime <$> processStart
+            , maybeSqlet "AND syscall.time < ?" $ showTime <$> processEnd
+            , maybeSqlet "AND exit.time > ?" $ showTime <$> contextStart  -- It finished after the start.
+            , maybeSqlet "AND syscall.time < ?" $ showTime <$> contextEnd -- It started before the finish.
             , flip foldMap contextHidden $ \p ->
               sqlet "AND return != ?" $ SQLText $ Text.pack $ show p
-            , ";" ] <&&> \[ SQLText pid ] -> read $ Text.unpack pid)
+            , ";" ] <&&> \[ SQLText pid ] -> read $ Text.unpack pid
+          processes database pids
     in pure Process{..}
 
 data Spans a = Spans [(Maybe a, Maybe a)]
@@ -178,6 +187,8 @@ instance Show a => Monoid (Spans a) where
 
 --    e   s   e      s   e       s e
 
+
+-- TO BE CONTINUED (2021/02/07)
 test = withDb $ \db -> do { context <- fullContext db; ps <- processForest db context; for_ ps $ \p -> do { putStr $ show (processId p) <> " -> "; putStrLn . show . map processId =<< processChildren p context } }
 
 rootPids = withDb $ \db -> putStrLn . show . map processId =<< processForest db =<< fullContext db
@@ -188,6 +199,34 @@ withDb action = withDatabase "/data/strace.sqlite" $ \database _ -> action datab
 processForest :: Database -> Context -> IO [Process]
 processForest database context@Context{..} =
   processes database $ Set.toList contextRoots
+
+
+walk :: Database -> Context -> [Process] -> IO [String]
+walk database context ps = fmap concat $ for ps $ \Process{..} -> do
+  children <- walk database context =<< processChildren context
+  pure $ show processId : map ("    " <>) children
+
+walkTest getContext = withDb $ \db -> do { context <- getContext db; roots <- processForest db context; traverse_ putStrLn =<< walk db context roots }
+
+-- TBC:
+-- * Walk process tree and generate partial order :: [(ProcessID, ProcessID)]
+-- * Topologically sort processes using the partial order
+-- * Layout process graph in this order
+
+{-
+
+SELECT DISTINCT(process.pid)
+FROM syscall AS process LEFT JOIN syscall AS clone
+ON clone.name = 'clone' AND clone.return = process.pid
+WHERE clone.return IS NULL;
+
+syscall (return, name)
+syscall (pid)
+
+exit (pid)
+
+
+-}
 
 -- IDEA: Could create a test that diffs the topological layout of the strace visualization.
 -- This would allow the slightest change to which processes start and their order to be noticed.
@@ -291,25 +330,11 @@ withDatabase path application = Sqlite.withDatabase path $
 createSchema :: Database -> IO ()
 createSchema database = executeStatements database
   [ [ "CREATE TABLE IF NOT EXISTS syscall ("
-    , "  id INTEGER,"
     , "  pid INTEGER,"
     , "  time TEXT,"
     , "  name TEXT,"
     , "  args TEXT,"
-    , "  return TEXT,"
-    , "  PRIMARY KEY (id)"  -- TODO: Get rid of `id` and also clone and execve tables. They are not needed.
-    , ");"
-    ]
-  , [ "CREATE TABLE IF NOT EXISTS clone ("
-    , "  id INTEGER,"
-    , "  child_pid INTEGER,"
-    , "  FOREIGN KEY (id) REFERENCES strace(id)"
-    , ");"
-    ]
-  , [ "CREATE TABLE IF NOT EXISTS execve ("
-    , "  id INTEGER,"
-    , "  path TEXT,"
-    , "  FOREIGN KEY (id) REFERENCES strace(id)"
+    , "  return TEXT"
     , ");"
     ]
   , [ "CREATE TABLE IF NOT EXISTS exit ("
@@ -325,6 +350,10 @@ createSchema database = executeStatements database
     , "  type TEXT"
     , ");"
     ]
+  , [ "CREATE INDEX IF NOT EXISTS syscall_pid_time ON syscall (pid, time);" ]
+  , [ "CREATE INDEX IF NOT EXISTS syscall_name ON syscall (name);" ]
+  , [ "CREATE INDEX IF NOT EXISTS syscall_return_name ON syscall (return, name);" ]
+  , [ "CREATE INDEX IF NOT EXISTS exit_pid_time ON exit (pid, time);" ]
   ]
 
 render :: Context -> [Process]
