@@ -79,6 +79,7 @@ executable log-view
     random,
     text,
     time,
+    transformers,
     unix,
     wai,
     warp

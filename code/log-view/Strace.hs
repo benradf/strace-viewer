@@ -24,8 +24,8 @@ import Data.Either (fromLeft, fromRight)
 import Data.Foldable (for_, traverse_)
 import Data.Functor (($>), (<&>))
 import Data.Int (Int64)
-import Data.List (sortBy)
-import Data.Maybe (fromJust, mapMaybe)
+import Data.List (find, sortBy)
+import Data.Maybe (fromJust, fromMaybe, mapMaybe)
 import Data.Ord (comparing)
 import Data.Set (Set)
 import qualified Data.Set as Set
@@ -208,10 +208,70 @@ walk database context ps = fmap concat $ for ps $ \Process{..} -> do
 
 walkTest getContext = withDb $ \db -> do { context <- getContext db; roots <- processForest db context; traverse_ putStrLn =<< walk db context roots }
 
+
+
+
 -- TBC:
 -- * Walk process tree and generate partial order :: [(ProcessID, ProcessID)]
 -- * Topologically sort processes using the partial order
 -- * Layout process graph in this order
+
+
+walkTest2 getContext = withDb $ \db -> do { context <- getContext db; grid <- layout context =<< processForest db context; traverse_ (putStrLn . show) $ grid <&&> \p -> processId p }
+
+layout :: Context -> [Process] -> IO [[Process]]
+layout context processes = foldr compose [] <$> do
+  let sort = sortBy $ comparing processStart
+  for (sort processes) $ \process -> do
+    children <- processChildren process context
+    layout context children <&> (<> [ [ process ] ])
+  where
+    compose lhs rhs =
+      fromMaybe (lhs <> rhs) $
+      find (not . any collides) $
+      overlap lhs rhs <$> [ 0 .. length lhs - 1 ]
+    overlap lhs rhs offset =
+      let len = max (length lhs) (length rhs) + offset
+          (xs, lhs') = splitAt offset lhs
+      in xs <> take len (zipWith (<>) (lhs' <> repeat []) (rhs <> repeat []))
+    collides = \case
+      p : ps@(q : _)
+        | (compare <$> processEnd p <*> processStart q) == Just LT -> collides ps
+        | otherwise -> True
+      _ -> False
+
+
+
+--layout :: Context -> Process -> IO [[Process]]
+--layout context process = foldr compose [ [ process ] ] <$> do
+--  let sort = sortBy $ comparing processStart
+--  children <- sort <$> processChildren process context
+--  for children $ layout context
+--  where
+--    compose lhs rhs =
+--      fromMaybe (lhs <> rhs) $
+--      find (not . any collides) $
+--      overlap lhs rhs <$> [ 0 .. length lhs - 1 ]
+--    overlap lhs rhs offset =
+--      let (xs, rhs') = splitAt offset rhs
+--      in xs <> zipWith (<>) lhs (rhs' <> repeat [])
+--    collides = \case
+--      p : ps@(q : _)
+--        | (compare <$> processEnd p <*> processStart q) == Just LT -> collides ps
+--        | otherwise -> True
+--      _ -> False
+
+
+
+
+
+
+
+
+{-
+      StartTime before that of an overlapping process means it must go further from the parent in the graph
+-}
+
 
 {-
 
@@ -359,8 +419,8 @@ createSchema database = executeStatements database
 render :: Context -> [Process]
 render = error "not implemented"
 
-layout :: [Process] -> [[Process]]
-layout = error "not implemented"
+--layout :: [Process] -> [[Process]]
+--layout = error "not implemented"
 
 loadLogs :: IO (Either String [StraceEntry])
 loadLogs = do
