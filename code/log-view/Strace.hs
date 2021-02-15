@@ -217,12 +217,12 @@ walkTest getContext = withDb $ \db -> do { context <- getContext db; roots <- pr
 -- * Layout process graph in this order
 
 
-walkTest2 getContext = withDb $ \db -> do { context <- getContext db; grid <- layout context =<< processForest db context; traverse_ (putStrLn . show) $ grid <&&> \p -> processId p }
+walkTest2 getContext = withDb $ \db -> do { context <- getContext db; grid <- layout context =<< processForest db context; traverse_ (putStrLn . show) $ (reverse grid) <&&> \p -> processId p }
 
 layout :: Context -> [Process] -> IO [[Process]]
 layout context processes = foldr compose [] <$> do
-  let sort = sortBy $ comparing processStart
-  for (sort processes) $ \process -> do
+  let sorted = sortBy $ comparing processStart
+  for (sorted processes) $ \process -> do
     children <- processChildren process context
     layout context children <&> (<> [ [ process ] ])
   where
@@ -231,7 +231,7 @@ layout context processes = foldr compose [] <$> do
       find (not . any collides) $
       overlap lhs rhs <$> [ 0 .. length lhs - 1 ]
     overlap lhs rhs offset =
-      let len = max (length lhs) (length rhs) + offset
+      let len = max (length lhs - offset) (length rhs)
           (xs, lhs') = splitAt offset lhs
       in xs <> take len (zipWith (<>) (lhs' <> repeat []) (rhs <> repeat []))
     collides = \case
