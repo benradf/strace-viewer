@@ -24,7 +24,7 @@ import Data.Either (fromLeft, fromRight)
 import Data.Foldable (for_, traverse_)
 import Data.Functor (($>), (<&>))
 import Data.Int (Int64)
-import Data.List (find, sortBy)
+import Data.List (find, intercalate, sortBy)
 import Data.Maybe (fromJust, fromMaybe, mapMaybe)
 import Data.Ord (comparing)
 import Data.Set (Set)
@@ -34,10 +34,12 @@ import qualified Data.Text as Text
 import Data.Text.Encoding (decodeUtf8)
 import Data.Time.Format (defaultTimeLocale, parseTimeM)
 import Data.Time.Format.ISO8601 (iso8601ParseM, iso8601Show)
-import Data.Time.LocalTime (TimeOfDay)
+import Data.Time.LocalTime (TimeOfDay, timeOfDayToTime)
 import Data.Traversable (for)
 import Database.SQLite3 (Database, SQLData(..))
 import Http.Server
+import Lucid.Svg (Svg)
+import qualified Lucid.Svg as Svg
 import qualified Sqlite
 import Sqlite hiding (withDatabase)
 import System.Environment (getArgs)
@@ -217,7 +219,7 @@ walkTest getContext = withDb $ \db -> do { context <- getContext db; roots <- pr
 -- * Layout process graph in this order
 
 
-walkTest2 getContext = withDb $ \db -> do { context <- getContext db; grid <- layout context =<< processForest db context; traverse_ (putStrLn . show) $ (reverse grid) <&&> \p -> processId p }
+walkTest2 getContext = withDb $ \db -> do { context <- getContext db; grid <- layout context =<< processForest db context; traverse_ (putStrLn . intercalate " ") $ (reverse grid) <&&> \p -> show (processId p) <> "{ " <> show (processStart p) <> " to " <> show (processEnd p) <> " }" }
 
 layout :: Context -> [Process] -> IO [[Process]]
 layout context processes = foldr compose [] <$> do
@@ -239,6 +241,34 @@ layout context processes = foldr compose [] <$> do
         | (compare <$> processEnd p <*> processStart q) == Just LT -> collides ps
         | otherwise -> True
       _ -> False
+
+render :: Context -> [[Process]] -> Svg ()
+render Context{..} grid = do
+  Svg.doctype_
+  Svg.with (Svg.svg11_ content)
+    [ Svg.version_ "1.1"
+    , Svg.viewBox_ "0 0 1920 1080"
+    ]
+  where
+    content = Svg.rect_
+      [ Svg.x_ "100"
+      , Svg.y_ "100"
+      , Svg.width_ "1720"
+      , Svg.height_ "880"
+      , Svg.fill_ "green"
+      ]
+    -- TBC: If either time is Nothing, need to use the max end or min start of all processes.
+    --scaleX = 1920 / timeOfDayToTime contextEnd - timeOfDayToTime contextStart
+    --timeToX t =
+    --lane top height
+
+renderTest :: (Database -> IO Context) -> IO ()
+renderTest getContext = withDb $ \db -> do
+  context <- getContext db
+  grid <- layout context =<< processForest db context
+  let svg = show $ render context $ reverse grid
+  writeFile "/tmp/svg" svg  -- while true; do eog http://172.17.0.3/tmp/svg; done
+  putStrLn svg
 
 
 
@@ -416,8 +446,8 @@ createSchema database = executeStatements database
   , [ "CREATE INDEX IF NOT EXISTS exit_pid_time ON exit (pid, time);" ]
   ]
 
-render :: Context -> [Process]
-render = error "not implemented"
+--render :: Context -> [Process]
+--render = error "not implemented"
 
 --layout :: [Process] -> [[Process]]
 --layout = error "not implemented"
