@@ -1,8 +1,8 @@
 { mkDerivation, attoparsec, base, binary, bytestring, containers
-, direct-sqlite, directory, http-client, http-types, lib, lucid-svg
-, mtl, process, QuickCheck, random, tasty, tasty-hunit
-, tasty-quickcheck, temporary, text, time, transformers, unix, wai
-, warp
+, direct-sqlite, directory, file-embed, http-client, http-types
+, lib, lucid, lucid-svg, mtl, process, QuickCheck, random, tasty
+, tasty-hunit, tasty-quickcheck, temporary, text, time
+, transformers, unix, wai, warp
 }:
 mkDerivation {
   pname = "code";
@@ -16,9 +16,9 @@ mkDerivation {
   ];
   executableHaskellDepends = [
     attoparsec base binary bytestring containers direct-sqlite
-    directory http-client http-types lucid-svg mtl process QuickCheck
-    random tasty tasty-hunit tasty-quickcheck temporary text time
-    transformers unix wai warp
+    directory file-embed http-client http-types lucid lucid-svg mtl
+    process QuickCheck random tasty tasty-hunit tasty-quickcheck
+    temporary text time transformers unix wai warp
   ];
   license = "unknown";
   hydraPlatforms = lib.platforms.none;

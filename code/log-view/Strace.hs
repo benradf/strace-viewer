@@ -1,8 +1,11 @@
+{-# LANGUAGE DeriveFoldable #-}
+{-# LANGUAGE ExtendedDefaultRules #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE DeriveFoldable #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 module Strace
   ( StraceEntry(..)
@@ -21,6 +24,7 @@ import qualified Data.Attoparsec.ByteString.Char8 as Parser
 import Data.ByteString.Char8 (unpack)
 import qualified Data.ByteString.Char8 as ByteString
 import Data.Either (fromLeft, fromRight)
+import Data.FileEmbed (embedFile)
 import Data.Foldable (for_, traverse_)
 import Data.Functor (($>), (<&>))
 import Data.Int (Int64)
@@ -32,16 +36,20 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Text.Encoding (decodeUtf8)
+import qualified Data.Text.Encoding as Text
+import Data.Text.Lazy (toStrict)
 import Data.Time.Format (defaultTimeLocale, parseTimeM)
 import Data.Time.Format.ISO8601 (iso8601ParseM, iso8601Show)
 import Data.Time.LocalTime (TimeOfDay, timeOfDayToTime)
 import Data.Traversable (for)
 import Database.SQLite3 (Database, SQLData(..))
 import Http.Server
-import Lucid.Svg (Svg)
-import qualified Lucid.Svg as Svg
+import Lucid.Base (Html)
+import qualified Lucid.Base as Html
+import qualified Lucid.Html5 as Html
 import qualified Sqlite
 import Sqlite hiding (withDatabase)
+import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.Environment (getArgs)
 import System.Posix.Types (ProcessID)
 import System.Process (CreateProcess(..), StdStream(..), proc, withCreateProcess)
@@ -242,33 +250,61 @@ layout context processes = foldr compose [] <$> do
         | otherwise -> True
       _ -> False
 
-render :: Context -> [[Process]] -> Svg ()
-render Context{..} grid = do
-  Svg.doctype_
-  Svg.with (Svg.svg11_ content)
-    [ Svg.version_ "1.1"
-    , Svg.viewBox_ "0 0 1920 1080"
-    ]
+render :: Text -> Context -> [[Process]] -> Html ()
+render script Context{..} grid = Html.doctypehtml_ $ do
+  Html.head_ $ do
+    Html.title_ "strace viewer"
+    Html.script_ script
+  Html.body_ mempty  -- TODO: If an strace.js file exists alongside binary, load and return that instead of embedded file.
   where
-    content = Svg.rect_
-      [ Svg.x_ "100"
-      , Svg.y_ "100"
-      , Svg.width_ "1720"
-      , Svg.height_ "880"
-      , Svg.fill_ "green"
-      ]
+--    script = lift $ doesFileExist "strace.js" >>= \case
+--      True -> Text.pack <$> readFile "strace.js"
+--      False -> pure $ Text.decodeUtf8 $(embedFile "log-view/strace.js")
+
+--  Svg.with (Svg.svg11_ content)
+--    [ Svg.version_ "1.1"
+--    --, Svg.viewBox_ "0 0 1920 1080"
+--    , Svg.viewBox_ "0 0 1920 1080"
+--    ]
+--  where
+--    content = do
+--      Svg.rect_
+--        [ Svg.x_ "100"
+--        , Svg.y_ "100"
+--        , Svg.width_ "1720"
+--        , Svg.height_ "880"
+--        , Svg.fill_ "blue"
+--        ]
     -- TBC: If either time is Nothing, need to use the max end or min start of all processes.
     --scaleX = 1920 / timeOfDayToTime contextEnd - timeOfDayToTime contextStart
     --timeToX t =
     --lane top height
 
+-- TBC: Write file to disk if it does not exist on startup so it can be modified. If the file on disk is different use that in render (because it has been modified).
+-- javascript :: Text
+-- javascript = 
+
+-- $ > renderTest fullContext
+
 renderTest :: (Database -> IO Context) -> IO ()
 renderTest getContext = withDb $ \db -> do
   context <- getContext db
   grid <- layout context =<< processForest db context
-  let svg = show $ render context $ reverse grid
-  writeFile "/tmp/svg" svg  -- while true; do eog http://172.17.0.3/tmp/svg; done
+  script <- doesFileExist "strace.js" >>= \case
+    True -> Text.pack <$> readFile "strace.js"
+    False -> pure $ Text.decodeUtf8 $(embedFile "log-view/strace.js")
+  let svg = Text.unpack $ toStrict $ Html.renderText $ render script  context $ reverse grid
+  createDirectoryIfMissing False "/www"
+  writeFile "/www/strace.html" svg
   putStrLn svg
+
+
+{-
+      location /tmp/ {
+        rewrite /tmp/(.*) /$1 break;
+        root /tmp;
+      }
+-}
 
 
 
