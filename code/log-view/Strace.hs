@@ -12,6 +12,7 @@ module Strace
   , Syscall(..)
   , Signal(..)
   , Exit(..)
+  , route
   , load
   , insert
   , parser
@@ -38,11 +39,13 @@ import qualified Data.Text as Text
 import Data.Text.Encoding (decodeUtf8)
 import qualified Data.Text.Encoding as Text
 import Data.Text.Lazy (toStrict)
+import qualified Data.Text.Lazy.Encoding as LazyText
 import Data.Time.Format (defaultTimeLocale, parseTimeM)
 import Data.Time.Format.ISO8601 (iso8601ParseM, iso8601Show)
 import Data.Time.LocalTime (TimeOfDay, timeOfDayToTime)
 import Data.Traversable (for)
-import Database.SQLite3 (Database, SQLData(..))
+import Database.SQLite3 (Database)
+import Database.SQLite3 (SQLData(..))
 import Http.Server
 import Lucid.Base (Html)
 import qualified Lucid.Base as Html
@@ -53,6 +56,16 @@ import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.Environment (getArgs)
 import System.Posix.Types (ProcessID)
 import System.Process (CreateProcess(..), StdStream(..), proc, withCreateProcess)
+
+route :: Database -> Application
+route database method request = do
+  context <- fullContext database
+  grid <- layout context =<< processForest database context
+  script <- doesFileExist "strace.js" >>= \case
+    True -> Text.pack <$> readFile "strace.js"
+    False -> pure $ Text.decodeUtf8 $(embedFile "log-view/strace.js")
+  pure $ ok textHtml $ LazyBody $ LazyText.encodeUtf8 $
+    Html.renderText $ render script context $ reverse grid
 
 data Syscall = Syscall
   { syscallPid :: ProcessID
@@ -254,9 +267,9 @@ render :: Text -> Context -> [[Process]] -> Html ()
 render script Context{..} grid = Html.doctypehtml_ $ do
   Html.head_ $ do
     Html.title_ "strace viewer"
+    Html.meta_ [ Html.charset_ "utf-8" ]
     Html.script_ script
-  Html.body_ mempty  -- TODO: If an strace.js file exists alongside binary, load and return that instead of embedded file.
-  where
+  Html.body_ mempty
 --    script = lift $ doesFileExist "strace.js" >>= \case
 --      True -> Text.pack <$> readFile "strace.js"
 --      False -> pure $ Text.decodeUtf8 $(embedFile "log-view/strace.js")
@@ -297,6 +310,11 @@ renderTest getContext = withDb $ \db -> do
   createDirectoryIfMissing False "/www"
   writeFile "/www/strace.html" svg
   putStrLn svg
+
+-- TODO: Consider allowing processes to be filtered by session id and potentially other process attributes.
+-- This could generalise the idea of a simple set of process roots and a set of subtrees to hide.
+-- strace?start=8:00&end=8:10&ppid=7&
+-- .. actually beginning to think this gains nothing over roots and hidden sets
 
 
 {-
@@ -442,10 +460,6 @@ insert database entries = do
       , maybe SQLNull SQLInteger exitCode
       , maybe SQLNull SQLText exitSignal
       ]
-
-route :: Application
-route method request = do
-  error "not implemented"  -- TODO: Render based on context from query params
 
 withDatabase :: FilePath -> (Database -> IO () -> IO ()) -> IO ()
 withDatabase path application = Sqlite.withDatabase path $

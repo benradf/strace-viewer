@@ -22,6 +22,7 @@ module Http.Server
   , internalServerError
   , textPlain
   , textCsv
+  , textHtml
   , textXml
   , applicationJson
   , applicationOctetStream
@@ -78,8 +79,7 @@ onTerminate action = void $
 
 listenWithShutdown :: Int -> ShutdownHandler -> Application -> IO ()
 listenWithShutdown port shutdown route = do
-  let address = "0.0.0.0"
-  log ansiBoldYellow $ "listening on " <> address <> ":" <> show port
+  log ansiBoldYellow $ "listening on localhost:" <> show port
   runWith port $ \request respond -> do
     logRequest request
     let method = parseMethod (requestMethod request)
@@ -96,7 +96,7 @@ listenWithShutdown port shutdown route = do
       LazyBody content -> Builder.fromLazyByteString content
   where
     runWith port = Warp.runSettings $
-      Warp.setHost "*" $ Warp.setPort port $
+      Warp.setHost "localhost" $ Warp.setPort port $
       Warp.setInstallShutdownHandler shutdown $
       Warp.defaultSettings
     logRequest request = log ansiBoldWhite $
@@ -153,6 +153,9 @@ textPlain = Just "text/plain"
 
 textCsv :: Maybe ContentType
 textCsv = Just "text/csv"
+
+textHtml :: Maybe ContentType
+textHtml = Just "text/html"
 
 textXml :: Maybe ContentType
 textXml = Just "text/xml"

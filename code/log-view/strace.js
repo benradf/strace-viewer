@@ -19,9 +19,9 @@ window.onload = function() {
   var rect = appendSvgElement(svg, "rect", {
     x: "100",
     y: "100",
-    width: "1720",
-    height: "880",
-    fill: "green"
+    width: "3896",
+    height: "1848",
+    fill: "#3bc460"
   });
   var rect = appendSvgElement(svg, "rect", {
     x: "0",
@@ -37,6 +37,9 @@ window.onload = function() {
     height: "48",
     fill: "#2ec7ff"
   });
+//  window.setTimeout(function() {
+//    window.location.reload();
+//  }, 1000);
 }
 
 function projectLayout() {
