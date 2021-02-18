@@ -6,6 +6,7 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeApplications #-}
 
 module Strace
   ( StraceEntry(..)
@@ -30,6 +31,7 @@ import Data.Foldable (for_, traverse_)
 import Data.Functor (($>), (<&>))
 import Data.Int (Int64)
 import Data.List (find, intercalate, sortBy)
+import qualified Data.Map as Map
 import Data.Maybe (fromJust, fromMaybe, mapMaybe)
 import Data.Ord (comparing)
 import Data.Set (Set)
@@ -42,7 +44,7 @@ import Data.Text.Lazy (toStrict)
 import qualified Data.Text.Lazy.Encoding as LazyText
 import Data.Time.Format (defaultTimeLocale, parseTimeM)
 import Data.Time.Format.ISO8601 (iso8601ParseM, iso8601Show)
-import Data.Time.LocalTime (TimeOfDay, timeOfDayToTime)
+import Data.Time.LocalTime (TimeOfDay, timeOfDayToTime, timeToTimeOfDay)
 import Data.Traversable (for)
 import Database.SQLite3 (Database)
 import Database.SQLite3 (SQLData(..))
@@ -56,16 +58,40 @@ import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.Environment (getArgs)
 import System.Posix.Types (ProcessID)
 import System.Process (CreateProcess(..), StdStream(..), proc, withCreateProcess)
+import Text.Read (readMaybe)
 
 route :: Database -> Application
-route database method request = do
-  context <- fullContext database
-  grid <- layout context =<< processForest database context
-  script <- doesFileExist "strace.js" >>= \case
-    True -> Text.pack <$> readFile "strace.js"
-    False -> pure $ Text.decodeUtf8 $(embedFile "log-view/strace.js")
-  pure $ ok textHtml $ LazyBody $ LazyText.encodeUtf8 $
-    Html.renderText $ render script context $ reverse grid
+route database method request = case method of
+  GET -> case queryParams request of
+    Nothing -> pure $ badRequest Nothing ""
+    Just params -> do
+      Context{..} <- fullContext database
+      let contextStart = deserialiseTime =<< Map.lookup "start" params
+          contextEnd = deserialiseTime =<< Map.lookup "end" params
+      grid <- layout Context{..} =<< processForest database Context{..}
+      script <- doesFileExist "strace.js" >>= \case
+        True -> Text.pack <$> readFile "strace.js"
+        False -> pure $ Text.decodeUtf8 $(embedFile "log-view/strace.js")
+      pure $ ok textHtml $ LazyBody $ LazyText.encodeUtf8 $
+        Html.renderText $ render script Context{..} $ reverse grid
+  _ -> pure $ methodNotAllowed Nothing ""
+
+  -- TODO: Embed minimum and maximum times in application so it knows the suitable range of times for contexts.
+
+  -- TBC:
+  --  1. Parse query params to get context
+  --  2. Serialise process tree to json
+
+serialiseTime :: TimeOfDay -> ByteString
+serialiseTime =
+  let convert = toRational . timeOfDayToTime
+  in ByteString.pack . show @Rational . convert
+
+deserialiseTime :: ByteString -> Maybe TimeOfDay
+deserialiseTime =
+  let convert = timeToTimeOfDay . fromRational
+  in fmap convert . readMaybe @Rational . ByteString.unpack
+
 
 data Syscall = Syscall
   { syscallPid :: ProcessID

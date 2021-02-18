@@ -26,6 +26,7 @@ module Http.Server
   , textXml
   , applicationJson
   , applicationOctetStream
+  , queryParams
   , urlEncode
   , module Data.ByteString
   , module Network.HTTP.Types.Header
@@ -38,6 +39,8 @@ import Data.ByteString (ByteString)
 import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.ByteString.Lazy as Lazy
 import Data.Functor (void)
+import Data.Map (Map)
+import qualified Data.Map as Map
 import Data.Maybe (maybeToList)
 import Data.String (IsString(..))
 import Log
@@ -165,6 +168,9 @@ applicationJson = Just "application/json"
 
 applicationOctetStream :: Maybe ContentType
 applicationOctetStream = Just "application/octet-stream"
+
+queryParams :: Request -> Maybe (Map ByteString ByteString)
+queryParams  request = Map.fromList <$> sequenceA (sequenceA <$> queryString request)
 
 urlEncode :: Url -> Url
 urlEncode = ByteString.unpack . URI.urlEncode True . ByteString.pack
