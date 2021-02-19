@@ -18,7 +18,7 @@ main = do
 
 server :: HasCallStack => Database -> IO ()
 server database = listen 8083 $ \method request -> case pathInfo request of
-  [ "strace" ] -> Strace.route database method request
+  "strace" : _ -> Strace.route database method request
   [] -> pure $ if method == GET
     then ok Nothing ""
     else methodNotAllowed Nothing ""

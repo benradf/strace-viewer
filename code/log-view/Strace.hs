@@ -31,6 +31,7 @@ import Data.Foldable (for_, traverse_)
 import Data.Functor (($>), (<&>))
 import Data.Int (Int64)
 import Data.List (find, intercalate, sortBy)
+import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Maybe (fromJust, fromMaybe, mapMaybe)
 import Data.Ord (comparing)
@@ -60,21 +61,50 @@ import System.Posix.Types (ProcessID)
 import System.Process (CreateProcess(..), StdStream(..), proc, withCreateProcess)
 import Text.Read (readMaybe)
 
+-- TODO: Can name of queryParams be changed to make its key-value check clear?
+
 route :: Database -> Application
-route database method request = case method of
-  GET -> case queryParams request of
-    Nothing -> pure $ badRequest Nothing ""
-    Just params -> do
-      Context{..} <- fullContext database
-      let contextStart = deserialiseTime =<< Map.lookup "start" params
-          contextEnd = deserialiseTime =<< Map.lookup "end" params
-      grid <- layout Context{..} =<< processForest database Context{..}
+route database method request = case pathInfo request of
+  [ "strace" ] -> case method of
+    GET -> do
+      context <- fullContext database
       script <- doesFileExist "strace.js" >>= \case
         True -> Text.pack <$> readFile "strace.js"
         False -> pure $ Text.decodeUtf8 $(embedFile "log-view/strace.js")
-      pure $ ok textHtml $ LazyBody $ LazyText.encodeUtf8 $
-        Html.renderText $ render script Context{..} $ reverse grid
-  _ -> pure $ methodNotAllowed Nothing ""
+      pure $ ok textHtml $ LazyBody $ LazyText.encodeUtf8 $ Html.renderText $ app script context
+    POST -> pure $ notImplemented Nothing ""
+    _ -> pure $ methodNotAllowed Nothing ""
+  [ "strace", uuid ] -> case method of
+    GET -> do
+      context <- fullContext database
+      case modifyContext context =<< queryParams request of
+        Nothing -> pure $ badRequest Nothing ""
+        Just context -> do
+          grid <- layout context =<< processForest database context
+          let jsonArray elements = "[" <> ByteString.intercalate "," elements <> "]"
+              serialiseProcess Process{..} = ByteString.unwords
+                [ "{"
+                , "\"pid\":" <> ByteString.pack (show processId) <> ","
+                , "\"start\":\"" <> maybe "null" serialiseTime processStart <> "\","
+                , "\"end\":\"" <> maybe "null" serialiseTime processEnd <> "\""
+                -- , "\"children\":" <>  -- Need IO here ...
+                , "}"
+                ]
+              serialiseRow = jsonArray . map serialiseProcess
+          pure $ ok applicationJson $ Body $ jsonArray (serialiseRow <$> grid)
+    _ -> pure $ methodNotAllowed Nothing ""
+  _ -> pure $ notFound Nothing ""
+
+
+modifyContext :: Context -> Map ByteString ByteString -> Maybe Context
+modifyContext Context{..} params = do
+  let parse f key = case f <$> Map.lookup key params of
+        Just (Just value) -> Just (Just value)
+        Just Nothing -> Nothing
+        Nothing -> Just Nothing
+  contextStart <- parse deserialiseTime "start"
+  contextEnd <- parse deserialiseTime "end"
+  pure Context{..}
 
   -- TODO: Embed minimum and maximum times in application so it knows the suitable range of times for contexts.
 
@@ -289,8 +319,8 @@ layout context processes = foldr compose [] <$> do
         | otherwise -> True
       _ -> False
 
-render :: Text -> Context -> [[Process]] -> Html ()
-render script Context{..} grid = Html.doctypehtml_ $ do
+app :: Text -> Context -> Html ()
+app script Context{..} = Html.doctypehtml_ $ do
   Html.head_ $ do
     Html.title_ "strace viewer"
     Html.meta_ [ Html.charset_ "utf-8" ]
@@ -332,7 +362,7 @@ renderTest getContext = withDb $ \db -> do
   script <- doesFileExist "strace.js" >>= \case
     True -> Text.pack <$> readFile "strace.js"
     False -> pure $ Text.decodeUtf8 $(embedFile "log-view/strace.js")
-  let svg = Text.unpack $ toStrict $ Html.renderText $ render script  context $ reverse grid
+  let svg = Text.unpack $ toStrict $ Html.renderText $ app script context
   createDirectoryIfMissing False "/www"
   writeFile "/www/strace.html" svg
   putStrLn svg

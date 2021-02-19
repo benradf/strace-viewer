@@ -31,9 +31,9 @@ window.onload = function() {
     fill: "#ebeff5"
   });
   var rect = appendSvgElement(svg, "rect", {
-    x: "3000",
+    x: "2200",
     y: "2000",
-    width: "512",
+    width: "912",
     height: "48",
     fill: "#2ec7ff"
   });
