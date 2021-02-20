@@ -23,14 +23,13 @@ module Strace
 
 import Data.Attoparsec.ByteString.Char8 (Parser)
 import qualified Data.Attoparsec.ByteString.Char8 as Parser
-import Data.ByteString.Char8 (unpack)
 import qualified Data.ByteString.Char8 as ByteString
 import Data.Either (fromLeft, fromRight)
 import Data.FileEmbed (embedFile)
 import Data.Foldable (for_, traverse_)
 import Data.Functor (($>), (<&>))
 import Data.Int (Int64)
-import Data.List (find, intercalate, sortBy)
+import Data.List (find, sortBy)
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Maybe (fromJust, fromMaybe, mapMaybe)
@@ -81,20 +80,25 @@ route database method request = case pathInfo request of
         Nothing -> pure $ badRequest Nothing ""
         Just context -> do
           grid <- layout context =<< processForest database context
-          let jsonArray elements = "[" <> ByteString.intercalate "," elements <> "]"
-              serialiseProcess Process{..} = ByteString.unwords
-                [ "{"
-                , "\"pid\":" <> ByteString.pack (show processId) <> ","
-                , "\"start\":\"" <> maybe "null" serialiseTime processStart <> "\","
-                , "\"end\":\"" <> maybe "null" serialiseTime processEnd <> "\""
-                -- , "\"children\":" <>  -- Need IO here ...
-                , "}"
+          let quoted s = "\"" <> s <> "\""
+              nullableTime = maybe "null" $ quoted . serialiseTime
+              jsonArray elements = "[" <> ByteString.intercalate "," elements <> "]"  -- TODO: Move json helpers to Http
+              jsonObject elements = "{" <> ByteString.intercalate "," (elements <&>   -- when they are needed elsewhere.
+                \(key, value) -> "\"" <> key <> "\":" <> value) <> "}"
+              serialiseKey NodeKey{..} = jsonObject
+                [ ("pid", ByteString.pack $ show nodeProcessId)
+                , ("start", nullableTime nodeStart)
+                , ("end", nullableTime nodeEnd)
                 ]
-              serialiseRow = jsonArray . map serialiseProcess
-          pure $ ok applicationJson $ Body $ jsonArray (serialiseRow <$> grid)
+              serialiseNode Node{..} = jsonObject
+                [ ("key", serialiseKey nodeKey)
+                , ("edges", jsonArray $ serialiseKey <$> nodeEdges)
+                , ("command", quoted $ Text.encodeUtf8 nodeCommand)
+                ]
+              serialiseRow = jsonArray . map serialiseNode
+          pure $ ok applicationJson $ Body $ jsonArray $ serialiseRow <$> grid
     _ -> pure $ methodNotAllowed Nothing ""
   _ -> pure $ notFound Nothing ""
-
 
 modifyContext :: Context -> Map ByteString ByteString -> Maybe Context
 modifyContext Context{..} params = do
@@ -296,14 +300,30 @@ walkTest getContext = withDb $ \db -> do { context <- getContext db; roots <- pr
 -- * Layout process graph in this order
 
 
-walkTest2 getContext = withDb $ \db -> do { context <- getContext db; grid <- layout context =<< processForest db context; traverse_ (putStrLn . intercalate " ") $ (reverse grid) <&&> \p -> show (processId p) <> "{ " <> show (processStart p) <> " to " <> show (processEnd p) <> " }" }
+--walkTest2 getContext = withDb $ \db -> do { context <- getContext db; grid <- layout context =<< processForest db context; traverse_ (putStrLn . intercalate " ") $ (reverse grid) <&&> \p -> show (processId p) <> "{ " <> show (processStart p) <> " to " <> show (processEnd p) <> " }" }
 
-layout :: Context -> [Process] -> IO [[Process]]
+data NodeKey = NodeKey
+  { nodeStart :: Maybe TimeOfDay
+  , nodeEnd :: Maybe TimeOfDay
+  , nodeProcessId :: ProcessID
+  }
+
+data Node = Node
+  { nodeKey :: NodeKey
+  , nodeCommand :: Text
+  , nodeEdges :: [NodeKey]
+  }
+
+layout :: Context -> [Process] -> IO [[Node]]
 layout context processes = foldr compose [] <$> do
   let sorted = sortBy $ comparing processStart
   for (sorted processes) $ \process -> do
     children <- processChildren process context
-    layout context children <&> (<> [ [ process ] ])
+    let toNodeKey Process{..} = NodeKey processStart processEnd processId
+        nodeEdges = toNodeKey <$> children
+        nodeKey = toNodeKey process
+        nodeCommand = ""
+    layout context children <&> (<> [ [ Node{..} ] ])
   where
     compose lhs rhs =
       fromMaybe (lhs <> rhs) $
@@ -315,7 +335,7 @@ layout context processes = foldr compose [] <$> do
       in xs <> take len (zipWith (<>) (lhs' <> repeat []) (rhs <> repeat []))
     collides = \case
       p : ps@(q : _)
-        | (compare <$> processEnd p <*> processStart q) == Just LT -> collides ps
+        | (compare <$> nodeEnd (nodeKey p) <*> nodeStart (nodeKey q)) == Just LT -> collides ps
         | otherwise -> True
       _ -> False
 
@@ -584,7 +604,7 @@ parser = do
   pid <- integer
   Parser.skipSpace
   let parseTime = parseTimeM False defaultTimeLocale "%T%Q"
-  Just time <- parseTime . unpack <$> Parser.takeTill Parser.isSpace
+  Just time <- parseTime . ByteString.unpack <$> Parser.takeTill Parser.isSpace
   Parser.skipSpace
   Parser.choice
     [ StraceSyscall <$> do
