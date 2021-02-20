@@ -27,7 +27,7 @@ function fromRatio(ratio) {
 }
 
 function render(layout) {
-    var foldMapNullableRatio = (f, g) =>
+    const foldMapNullableRatio = (f, g) =>
         layout.reduce((a, row) => {
             const x = g(row);
             if (x == null) {
@@ -38,20 +38,33 @@ function render(layout) {
                 return f(a, fromRatio(x));
             }
         }, null);
-    var bounds = {
-        min: foldMapNullableRatio(Math.min, row => row[0].key.start),
-        max: foldMapNullableRatio(Math.max, row => row[row.length - 1].key.end)
-    };
-    console.log("bounds.min = " + String(bounds.min));
-    console.log("bounds.max = " + String(bounds.max));
-    var renderNode = function(node) {
+    const minBound = foldMapNullableRatio(Math.min, row => row[0].key.start);
+    const maxBound = foldMapNullableRatio(Math.max, row => row[row.length - 1].key.end);
+    // TODO: Handle either or both bounds being null.
+    const rowHeight = 100 / layout.length;
+    const timeToPercentage = time => 100 * (fromRatio(time) - minBound) / (maxBound - minBound);
+    return layout.flatMap((row, index) => row.map(node => {
+        const { pid, start, end } = node.key;
+        const x = start == null ? 0 : timeToPercentage(start);
+        const width = (end == null ? 100 : timeToPercentage(end)) - x;
+        const randomComponent = () => Math.floor(255 * Math.random());
+        const randomColour = () => `rgb(${randomComponent()}, ${randomComponent()}, ${randomComponent()})`;
         var rect = createSvgElement("rect", {
-            
+            x: `${x}%`,
+            width: `${width}%`,
+            y: `${(index + 0.1) * rowHeight}%`,
+            height: `${0.8 * rowHeight}%`,
+            fill: randomColour()
         });
-        rect.dataset.pid = node.key.pid;
-        rect.dataset.start = node.key.start;
-        rect.dataset.end = node.key.end;
-    }
+        rect.dataset.pid = pid;
+        rect.dataset.start = start;
+        rect.dataset.end = end;
+        return rect;
+    }));
+
+//    console.log("startTimeToPercentage(400) = " + String(startTimeToPercentage("405 % 1")));
+//    console.log("bounds.min = " + String(minBound));
+//    console.log("bounds.max = " + String(maxBound));
 }
 
 window.onload = function() {
@@ -59,6 +72,11 @@ window.onload = function() {
         version: "2",
         viewBox:  "0 0 4096 2048"
     });
+    fetchLayout().then(layout => {
+        render(layout).forEach(rect => svg.appendChild(rect));
+        console.log(rects.length);
+    });
+/*
     var rect = appendSvgElement(svg, "rect", {
         x: "100",
         y: "100",
@@ -81,7 +99,7 @@ window.onload = function() {
         height: "48",
         fill: "#2ec7ff"
     });
-    fetchLayout().then(render);
+*/
 //    window.setTimeout(function() {
 //      window.location.reload();
 //    }, 3000);
