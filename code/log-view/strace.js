@@ -29,6 +29,17 @@ function fromRatio(ratio) {
     return parseInt(numerator) / parseInt(denominator);
 }
 
+function rgbHue(h) {
+    const s = 1
+    const l = 0.5
+    const a = s * Math.min(l, 1 - l);
+    const fracMod = (x, n) => x - Math.floor(Math.floor(x) / n) * n;
+    const k = n => fracMod(n + h / 30, 12);
+    const f = n => l - a * Math.max(-1, Math.min(Math.min(k(n) - 3, 9 - k(n)), 1));
+    const scale = x => Math.floor(255 * x);
+    return `rgb(${scale(f(0))},${scale(f(8))},${scale(f(4))})`;
+}
+
 function render(layout) {
     const foldMapNullableRatio = (f, g) =>
         layout.reduce((a, row) => {
@@ -46,8 +57,9 @@ function render(layout) {
     // TODO: Handle either or both bounds being null.
     const rowHeight = 100 / layout.length;
     const timeToPercentage = time => 100 * (fromRatio(time) - minBound) / (maxBound - minBound);
-    var pendingEdges = { }
-    return layout.flatMap((row, index) => row.flatMap(node => {
+    const pendingEdges = { };
+    const colourDistribution = [ ];
+    const elements = layout.flatMap((row, index) => row.flatMap(node => {
         const { pid, start, end } = node.key;
         const x = start == null ? 0 : timeToPercentage(start);
         const width = (end == null ? 100 : timeToPercentage(end)) - x;
@@ -58,35 +70,57 @@ function render(layout) {
             width: `${width}%`,
             y: `${(index + 0.1) * rowHeight}%`,
             height: `${0.8 * rowHeight}%`,
-            fill: randomColour()
+            //fill: randomColour()
         });
         rect.dataset.pid = pid;
         rect.dataset.start = start;
         rect.dataset.end = end;
+        const elements = [ rect ];
+        const edge = pendingEdges[JSON.stringify(node.key)];
+        const depth = edge !== undefined ? edge.depth : 0;
+        if (edge !== undefined) {
+            elements.push(createSvgElement("line", {
+                x1: rect.getAttribute("x"),
+                y1: edge.y1,
+                x2: rect.getAttribute("x"),
+                y2: rect.getAttribute("y"),
+                //stroke: rect.getAttribute("fill")
+            }));
+        }
         node.edges.forEach(edge => {
-            const key = JSON.stringify(edge)
+            const key = JSON.stringify(edge);
             if (pendingEdges[key] !== undefined) {
                 throw new Error("child process has multiple parents");
             }
-            pendingEdges[key] = `${(index + 0.9) * rowHeight}%`;
+            pendingEdges[key] = {
+                y1: `${(index + 0.9) * rowHeight}%`,
+                depth: depth + 1
+            };
         });
-        const elements = [ rect ];
-        const key = JSON.stringify(node.key);
-        if (pendingEdges[key] !== undefined) {
-            elements.push(createSvgElement("line", {
-                x1: rect.getAttribute("x"),
-                y1: pendingEdges[key],
-                x2: rect.getAttribute("x"),
-                y2: rect.getAttribute("y"),
-                stroke: rect.getAttribute("fill")
-            }));
-        }
+        colourDistribution.push(depth);
+        colourDistribution.push(elements);
         return elements;
     }));
-
-//    console.log("startTimeToPercentage(400) = " + String(startTimeToPercentage("405 % 1")));
-//    console.log("bounds.min = " + String(minBound));
-//    console.log("bounds.max = " + String(maxBound));
+    var hue = 0;
+    const spacerSize = depth => Math.pow(0.5, depth);
+    const totalSize = colourDistribution.filter(Number.isInteger).map(spacerSize).reduce((x, y) => x + y);
+    colourDistribution.forEach(item => {
+        if (Array.isArray(item)) {
+            item.forEach(element => {
+                switch (element.localName) {
+                    case "rect":
+                        element.setAttribute("fill", rgbHue(hue));
+                        break;
+                    case "line":
+                        element.setAttribute("stroke", rgbHue(hue));
+                        break;
+                }
+            });
+        } else {
+            hue += (360 / totalSize) * spacerSize(item);
+        }
+    });
+    return elements;
 }
 
 window.onload = function() {
@@ -121,7 +155,7 @@ window.onload = function() {
 */
 //    window.setTimeout(function() {
 //      window.location.reload();
-//    }, 3000);
+//    }, 15000);
 }
 
 function projectLayout() {
