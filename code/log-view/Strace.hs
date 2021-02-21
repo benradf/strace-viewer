@@ -132,7 +132,7 @@ route database method request = case pathInfo request of
                 , ("command", quoted $ Text.encodeUtf8 nodeCommand)
                 ]
               serialiseRow = jsonArray . map serialiseNode
-          pure $ ok applicationJson $ Body $ jsonArray $ serialiseRow <$> grid
+          pure $ ok applicationJson $ Body $ jsonArray $ reverse $ serialiseRow <$> grid
     _ -> pure $ methodNotAllowed Nothing ""
   _ -> pure $ notFound Nothing ""
 

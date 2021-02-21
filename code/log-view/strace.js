@@ -1,5 +1,6 @@
 async function fetchLayout(context) {
-    var response = await fetch("/strace/1?start=400%251&end=401%251");
+    //var response = await fetch("/strace/1?start=400%251&end=401%251");
+    var response = await fetch("/strace/1");
     if (!response.ok) {
         throw new Error("fetchLayout failed: " + response.statusText);
     }
@@ -14,6 +15,8 @@ function createSvgElement(name, attributes) {
     }
     return element;
 }
+
+// TODO: Pass through the query string to the app as context to fetchLayout request. This allows bookmarks and history.
 
 function appendSvgElement(parent, name, attributes) {
     var element = createSvgElement(name, attributes);
@@ -43,7 +46,8 @@ function render(layout) {
     // TODO: Handle either or both bounds being null.
     const rowHeight = 100 / layout.length;
     const timeToPercentage = time => 100 * (fromRatio(time) - minBound) / (maxBound - minBound);
-    return layout.flatMap((row, index) => row.map(node => {
+    var pendingEdges = { }
+    return layout.flatMap((row, index) => row.flatMap(node => {
         const { pid, start, end } = node.key;
         const x = start == null ? 0 : timeToPercentage(start);
         const width = (end == null ? 100 : timeToPercentage(end)) - x;
@@ -59,7 +63,25 @@ function render(layout) {
         rect.dataset.pid = pid;
         rect.dataset.start = start;
         rect.dataset.end = end;
-        return rect;
+        node.edges.forEach(edge => {
+            const key = JSON.stringify(edge)
+            if (pendingEdges[key] !== undefined) {
+                throw new Error("child process has multiple parents");
+            }
+            pendingEdges[key] = `${(index + 0.9) * rowHeight}%`;
+        });
+        const elements = [ rect ];
+        const key = JSON.stringify(node.key);
+        if (pendingEdges[key] !== undefined) {
+            elements.push(createSvgElement("line", {
+                x1: rect.getAttribute("x"),
+                y1: pendingEdges[key],
+                x2: rect.getAttribute("x"),
+                y2: rect.getAttribute("y"),
+                stroke: rect.getAttribute("fill")
+            }));
+        }
+        return elements;
     }));
 
 //    console.log("startTimeToPercentage(400) = " + String(startTimeToPercentage("405 % 1")));
