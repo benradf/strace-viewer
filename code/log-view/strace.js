@@ -1,5 +1,5 @@
 async function fetchLayout(context) {
-    var response = await fetch("/strace/1");
+    var response = await fetch("/strace/1?start=400%251&end=401%251");
     if (!response.ok) {
         throw new Error("fetchLayout failed: " + response.statusText);
     }
@@ -72,10 +72,7 @@ window.onload = function() {
         version: "2",
         viewBox:  "0 0 4096 2048"
     });
-    fetchLayout().then(layout => {
-        render(layout).forEach(rect => svg.appendChild(rect));
-        console.log(rects.length);
-    });
+    fetchLayout().then(layout => render(layout).forEach(rect => svg.appendChild(rect)));
 /*
     var rect = appendSvgElement(svg, "rect", {
         x: "100",

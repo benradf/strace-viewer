@@ -29,11 +29,12 @@ import Data.FileEmbed (embedFile)
 import Data.Foldable (for_, traverse_)
 import Data.Functor (($>), (<&>))
 import Data.Int (Int64)
-import Data.List (find, sortBy)
+import Data.List (find, sortBy, transpose)
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Maybe (fromJust, fromMaybe, mapMaybe)
 import Data.Ord (comparing)
+import Data.Ratio((%), Ratio)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -56,9 +57,44 @@ import qualified Sqlite
 import Sqlite hiding (withDatabase)
 import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.Environment (getArgs)
+import System.IO (IOMode(..), withFile)
+import System.IO (hPutStrLn)
 import System.Posix.Types (ProcessID)
 import System.Process (CreateProcess(..), StdStream(..), proc, withCreateProcess)
+import Text.Printf (printf)
 import Text.Read (readMaybe)
+
+
+
+
+hsv :: Integral a => Ratio a -> (Ratio a, Ratio a, Ratio a)
+hsv h = (f 0, f 8, f 4)
+  where
+    f n = l - a * (max (-1) (minimum [k n - 3, 9 - k n, 1]))
+    k n = (n + h / 30) `fracMod` 12
+    a = s * min l (1 - l) 
+    fracMod x n = let (y, z) = properFraction x in fromIntegral (y `mod` n) + z
+    l = 1 % 2
+    s = 1
+
+
+
+
+colourRects :: IO ()
+colourRects = withFile "/tmp/colours.svg" WriteMode $ \file -> do
+  hPutStrLn file "<svg version=\"1.1\" baseProfile=\"full\" width=\"100\" height=\"100%\" xmlns=\"http://www.w3.org/2000/svg\">"
+  for_ ([ 0 .. 91 ] <&> \n -> let (r, g, b) = hsv (n * (360 % 92)) in ((floor $ 255 * r, floor $ 255 * g, floor $ 255 * b), n)) $ \((r, g, b), i) -> hPutStrLn file $ "<rect x=\"0\" width=\"100\" y=\"" <> show (floor (i * height)) <> "\" height=\"" <> show (floor height) <> "\" fill=\"" <> printf "#%02x%02x%02x" r g b <> "\" />"
+  hPutStrLn file "</svg>"
+  where
+    height = 10
+    count = 12
+
+
+
+
+
+
+
 
 -- TODO: Can name of queryParams be changed to make its key-value check clear?
 
@@ -284,12 +320,12 @@ processForest database context@Context{..} =
   processes database $ Set.toList contextRoots
 
 
-walk :: Database -> Context -> [Process] -> IO [String]
-walk database context ps = fmap concat $ for ps $ \Process{..} -> do
-  children <- walk database context =<< processChildren context
-  pure $ show processId : map ("    " <>) children
-
-walkTest getContext = withDb $ \db -> do { context <- getContext db; roots <- processForest db context; traverse_ putStrLn =<< walk db context roots }
+--walk :: Database -> Context -> [Process] -> IO [String]
+--walk database context ps = fmap concat $ for ps $ \Process{..} -> do
+--  children <- walk database context =<< processChildren context
+--  pure $ show processId : map ("    " <>) children
+--
+--walkTest getContext = withDb $ \db -> do { context <- getContext db; roots <- processForest db context; traverse_ putStrLn =<< walk db context roots }
 
 
 
