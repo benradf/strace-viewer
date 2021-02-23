@@ -115,7 +115,10 @@ route database method request = case pathInfo request of
       case modifyContext context =<< queryParams request of
         Nothing -> pure $ badRequest Nothing ""
         Just context -> do
-          grid <- layout context =<< processForest database context
+          let getPid [ SQLInteger pid ] = fromIntegral pid
+          pids <- getPid <$$> rootProcesses database context
+          forest <- processes database pids
+          grid <- layout context forest
           let quoted s = "\"" <> s <> "\""
               nullableTime = maybe "null" $ quoted . serialiseTime
               jsonArray elements = "[" <> ByteString.intercalate "," elements <> "]"  -- TODO: Move json helpers to Http
@@ -205,12 +208,18 @@ nonRoots database = executeSql database
     # Processes that were already running when strace began recording:
     sqlite3 /tmp/strace.sqlite "
 -}
-rootProcesses :: Database -> IO [[SQLData]]
-rootProcesses database = executeSql database
-  [ "SELECT pid FROM (SELECT DISTINCT(pid) as pid FROM syscall) as process"
+rootProcesses :: Database -> Context -> IO [[SQLData]]
+rootProcesses database Context{..} = executeSqlets database
+  [ "SELECT pid FROM ("
+  , "  SELECT DISTINCT(pid) as pid FROM syscall WHERE true"
+  , maybeSqlet "AND time >= ?" $ showTime <$> contextStart
+  , maybeSqlet "AND time < ?" $ showTime <$> contextEnd
+  , ") as process"  -- TODO: Consider how to get all running processes in context window (even those that make no syscalls during this window)
   , "LEFT JOIN (SELECT return FROM syscall WHERE name = 'clone') as clone"
   , "ON process.pid = clone.return WHERE clone.return IS NULL;"
-  ] []
+  ]
+  where
+    showTime = SQLText . Text.pack . iso8601Show
 
 -- 
 
@@ -276,8 +285,8 @@ processes database pids = fmap concat $ for pids $ \pid -> do
             , sqlet "AND syscall.pid = ?" $ SQLInteger $ fromIntegral pid
             , maybeSqlet "AND syscall.time >= ?" $ showTime <$> processStart
             , maybeSqlet "AND syscall.time < ?" $ showTime <$> processEnd
-            , maybeSqlet "AND exit.time > ?" $ showTime <$> contextStart  -- It finished after the start.
-            , maybeSqlet "AND syscall.time < ?" $ showTime <$> contextEnd -- It started before the finish.
+            , maybeSqlet "AND (exit.time > ? OR exit.time IS NULL)" $ showTime <$> contextStart
+            , maybeSqlet "AND (syscall.time < ? OR syscall.time IS NULL)" $ showTime <$> contextEnd
             , flip foldMap contextHidden $ \p ->
               sqlet "AND return != ?" $ SQLText $ Text.pack $ show p
             , ";" ] <&&> \[ SQLText pid ] -> read $ Text.unpack pid
@@ -520,7 +529,7 @@ fullContext database = do
       contextEnd = Nothing
       contextHidden = Set.empty
       contextSyscalls = Set.empty
-  contextRoots <- fmap Set.fromList $ rootProcesses database <&&>
+  contextRoots <- fmap Set.fromList $ rootProcesses database Context{..} <&&>
     \[ SQLInteger pid ] -> fromIntegral pid
   pure Context{..}
 
@@ -907,3 +916,9 @@ TO BE CONTINUED: Design data model around the following REST interface:
     GET /strace?name={name}&start={start} ...
 
 -}
+
+(<$$>) :: (Functor f, Functor g) => (a -> b) -> f (g a) -> f (g b)
+(<$$>) = fmap . fmap
+
+(<&&>) :: (Functor f, Functor g) => f (g a) -> (a -> b) -> f (g b)
+(<&&>) = flip (<$$>)

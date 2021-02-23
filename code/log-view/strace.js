@@ -1,11 +1,14 @@
 async function fetchLayout(context) {
     //var response = await fetch("/strace/1?start=400%251&end=401%251");
     var response = await fetch("/strace/1");
+    //var response = await fetch("/strace/1?start=1600%254&end=1602%254");
     if (!response.ok) {
         throw new Error("fetchLayout failed: " + response.statusText);
     }
     return JSON.parse(await response.text());
 }
+
+// IDEA: Make normal colour of rect 50% saturation and use 100% to indicate syscalls.
 
 function createSvgElement(name, attributes) {
     const ns = "http://www.w3.org/2000/svg";
@@ -30,7 +33,7 @@ function fromRatio(ratio) {
 }
 
 function rgbHue(h) {
-    const s = 1
+    const s = 0.6
     const l = 0.5
     const a = s * Math.min(l, 1 - l);
     const fracMod = (x, n) => x - Math.floor(Math.floor(x) / n) * n;
@@ -63,14 +66,11 @@ function render(layout) {
         const { pid, start, end } = node.key;
         const x = start == null ? 0 : timeToPercentage(start);
         const width = (end == null ? 100 : timeToPercentage(end)) - x;
-        const randomComponent = () => Math.floor(255 * Math.random());
-        const randomColour = () => `rgb(${randomComponent()}, ${randomComponent()}, ${randomComponent()})`;
         var rect = createSvgElement("rect", {
             x: `${x}%`,
             width: `${width}%`,
             y: `${(index + 0.1) * rowHeight}%`,
             height: `${0.8 * rowHeight}%`,
-            //fill: randomColour()
         });
         rect.dataset.pid = pid;
         rect.dataset.start = start;
@@ -84,7 +84,6 @@ function render(layout) {
                 y1: edge.y1,
                 x2: rect.getAttribute("x"),
                 y2: rect.getAttribute("y"),
-                //stroke: rect.getAttribute("fill")
             }));
         }
         node.edges.forEach(edge => {
@@ -101,8 +100,8 @@ function render(layout) {
         colourDistribution.push(elements);
         return elements;
     }));
-    var hue = 0;
-    const spacerSize = depth => Math.pow(0.5, depth);
+    var hue = 0;     // smaller spacer size bases have all processes under a root closer in colour
+    const spacerSize = depth => Math.pow(0.1, depth);
     const totalSize = colourDistribution.filter(Number.isInteger).map(spacerSize).reduce((x, y) => x + y);
     colourDistribution.forEach(item => {
         if (Array.isArray(item)) {
@@ -120,15 +119,58 @@ function render(layout) {
             hue += (360 / totalSize) * spacerSize(item);
         }
     });
-    return elements;
+    var graph = createSvgElement("g", { id: "graph" });
+    elements.forEach(element => graph.appendChild(element));
+    return graph;
+}
+
+// Consider changing some uses of Object to Map
+
+function animate(target, at) {
+    const start = performance.now()
+    const source = document.getElementById("graph").cloneNode(true);
+    const getKey = dataset => JSON.stringify({
+        pid: dataset.pid,
+        start: dataset.start,
+        end: dataset.end
+    });
+    const elements = { };
+    for (let element of source) {
+        elements[getKey(element.dataset)] = {
+            source: element
+        }
+    }
+    for (let element of target) {
+        // will need to add when there wasn't a source
+    }
+
+    // Map NodeKey (SourceElement, TargetElement)
+    // Build the above map using the cloned source, provided target, and contextually computed
+    // TODO: add any rect elements in target that are new
+    return window.requestAnimationFrame(timestamp => {
+        const t = (timestamp - start) / (at - start);
+        for (let element of source.children) {
+            const animateAttribute = name => {
+                
+            }
+            //console.log(element);
+        }
+        //const getValue = key => 
+
+    });
 }
 
 window.onload = function() {
     var svg = appendSvgElement(document.body, "svg", {
         version: "2",
-        viewBox:  "0 0 4096 2048"
+        viewBox:  "0 0 4096 2048",
+        style: "background: black;"
     });
-    fetchLayout().then(layout => render(layout).forEach(rect => svg.appendChild(rect)));
+    fetchLayout().then(layout => {
+        const graph = render(layout);
+        svg.appendChild(graph);
+        animate(graph, performance.now() + 1000);
+    });
 /*
     var rect = appendSvgElement(svg, "rect", {
         x: "100",
@@ -155,7 +197,7 @@ window.onload = function() {
 */
 //    window.setTimeout(function() {
 //      window.location.reload();
-//    }, 15000);
+//    }, 1000);
 }
 
 function projectLayout() {
