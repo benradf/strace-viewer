@@ -32,6 +32,10 @@ function fromRatio(ratio) {
     return parseInt(numerator) / parseInt(denominator);
 }
 
+function toRatio(number) {
+    return encodeURIComponent(`${Math.floor(number * 1000000)} % 1000000`);
+}
+
 function rgbHue(h) {
     const s = 0.6
     const l = 0.5
@@ -110,7 +114,7 @@ function render(layout) {
                     case "rect":
                         element.setAttribute("fill", rgbHue(hue));
                         break;
-                    case "line":
+                    case "line":  // Consider using: https://vanseodesign.com/web-design/svg-linear-gradients/
                         element.setAttribute("stroke", rgbHue(hue));
                         break;
                 }
@@ -126,8 +130,8 @@ function render(layout) {
 
 // Consider changing some uses of Object to Map
 
-function animate(target, at) {
-    const start = performance.now()
+function animate2(target, at) {
+    const start = performance.now();
     const source = document.getElementById("graph").cloneNode(true);
     const getKey = dataset => JSON.stringify({
         pid: dataset.pid,
@@ -135,14 +139,17 @@ function animate(target, at) {
         end: dataset.end
     });
     const elements = { };
-    for (let element of source) {
+    for (let element of source.children) {
         elements[getKey(element.dataset)] = {
             source: element
         }
     }
-    for (let element of target) {
+    for (let element of target.children) {
         // will need to add when there wasn't a source
     }
+    // TODO: Decouple temporal and process dimensions and animate them separately.
+    // Start the temporal animation immediately before fetching the new layout.
+    // Start the process dimension animation when the fetch returns and speed up temporal animation.
 
     // Map NodeKey (SourceElement, TargetElement)
     // Build the above map using the cloned source, provided target, and contextually computed
@@ -160,16 +167,125 @@ function animate(target, at) {
     });
 }
 
+function renderTimeAxis() {
+    var axis = createSvgElement("g", { });
+    
+    return axis;
+}
+
+async function fetchFullContext() {
+    
+    var response = await fetch("/strace/1");
+    //var response = await fetch("/strace/1?start=1600%254&end=1602%254");
+    if (!response.ok) {
+        throw new Error("fetchLayout failed: " + response.statusText);
+    }
+    return JSON.parse(await response.text());
+}
+
+async function dataSource() {
+    async function fetchData(start, end) {
+        var queryParams = [ ];
+        if (start != null) {
+            query.push(`start=${toRatio(start)}`);
+        }
+        if (end != null) {
+            query.push(`end=${toRatio(end)}`);
+        }
+        var response = await fetch(`/strace/1?${queryParams.join("&")}`);
+        if (!response.ok) {
+            throw new Error("fetchData failed: " + response.statusText);
+        }
+        return JSON.parse(await response.text());
+    }
+    const foldMapNullableRatio = (layout, f, g) =>
+        layout.reduce((a, row) => {
+            const x = g(row);
+            if (x == null) {
+                return a;
+            } else if (a == null) {
+                return fromRatio(x);
+            } else {
+                return f(a, fromRatio(x));
+            }
+        }, null);
+    const minTime = layout => foldMapNullableRatio(layout, Math.min, row => row[0].key.start);
+    const maxTime = layout => foldMapNullableRatio(layoyt, Math.max, row => row[row.length - 1].key.end);
+    const fullContext = await fetchData();
+    /* Things that need controlling:
+        - animating the temporal dimension: always update on setTime for smooth lagless feel
+        - requesting new layout: wait 1000ms before initiating a fetch and only have one fetch in progress at any moment
+            Actions to take on fetch():
+            - no fetch: setTimeout 1000ms and enter 'fetch pending' state (start fetch in callback)
+            - fetch pending: update context of pending fetch but leave timer alone
+            - fetch in progress: queue a pending fetch after this one finishes
+     */
+
+    const state = { active: false };
+    const setPending = context => state.pending = context;
+    const fetchPending = () => {
+        fetchData(state.pending.start, state.pending.end).then(layout => {
+            if (state.pending) {
+                fetchPending();
+            } else {
+                state.active = false;
+            }
+        });
+        state.pending = null;
+    };
+
+    const setTime = (start, end, immediate) => {
+        setPending({ start, end });
+        if (!state.active) {
+            window.setTimeout(fetchPending, 1000);
+            state.active = true;
+        }
+    };
+
+//    return {
+//        setStartTime: setTime
+//    }
+
+    return state;
+
+/*
+        setStartTime(time, immediate)
+        setEndTime(time, immediate)
+*/
+}
+
+function animate(duration, action) {
+    const start = performance.now();
+    const end = start + duration;
+    const animation = {
+        cancel: function() {
+            window.cancelAnimationFrame(this.id);
+        }
+    };
+    const nextFrame = () => window.requestAnimationFrame(now => {
+        const t = (now - start) / (end - start);
+        //console.log(`now = ${now}, start = ${start}, end = ${end}, t = ${t}`);
+        action(Math.min(t, 1));
+        if (t < 1) {
+            animation.id = nextFrame();
+        }
+    });
+    animation.id = nextFrame();
+    return animation;
+}
+
 window.onload = function() {
+    const data = dataSource();
     var svg = appendSvgElement(document.body, "svg", {
         version: "2",
         viewBox:  "0 0 4096 2048",
-        style: "background: black;"
+        //style: "background: black;"
     });
     fetchLayout().then(layout => {
         const graph = render(layout);
         svg.appendChild(graph);
-        animate(graph, performance.now() + 1000);
+        animate2(graph, performance.now() + 1000);
+        svg.appendChild(renderTimeAxis());
     });
 /*
     var rect = appendSvgElement(svg, "rect", {
@@ -203,3 +319,5 @@ window.onload = function() {
 function projectLayout() {
     alert("test!");
 }
+
+// vim: ts=4 sts=4 sw=4
