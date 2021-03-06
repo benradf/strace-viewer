@@ -168,26 +168,19 @@ function animate2(target, at) {
 }
 
 function appendTimeControl(svg) {
-    const handleSize = 4;
+    const handleSize = 16;
     const textHeight = 48;
     const control = createSvgElement("g", { });
     svg.append(control);
 //    const style = createSvgElement("style", { });
 //    style.textContent = `
-//        @keyframes selectionGlow {
-//            from {
-//                box-shadow: ${handleSize}px ${handleSize}px 0px 0px #00b4f0;
-//            }
-//            to {
-//                box-shadow: ${2*handleSize}px ${2*handleSize}px 0px 0px #00b4f0;
-//            }
-//        }
+//
 //    `;
 //    control.append(style);
     const actualWidth = svg.getBoundingClientRect().width * window.devicePixelRatio;
     const fixedSize = px => Math.ceil(px * 1920 / actualWidth);
-    const text = (id, x, y, anchor, baseline, content) => {
-        const element = createSvgElement("text", { id, x, y,
+    const text = (x, y, anchor, baseline, content) => {
+        const element = createSvgElement("text", { x, y,
             "text-anchor": anchor,
             "dominant-baseline": baseline,
             "font-size": `${fixedSize(textHeight)}px`,
@@ -231,13 +224,13 @@ function appendTimeControl(svg) {
         stroke: "#3fff3f",
         "stroke-width": "3",
     }));
-    const earliest = text("earliest", 0, 512 - fixedSize(12), "start", "text-top", "00:06:32");
+    const earliest = text(0, 512 - fixedSize(12), "start", "text-top", "00:06:32");
     control.append(earliest);
-    const latest = text("latest", 4096, 512 - fixedSize(12), "end", "text-top", "00:07:15");
+    const latest = text(4096, 512 - fixedSize(12), "end", "text-top", "00:07:15");
     control.append(latest);
-    const start = text("start", 768, 512 + fixedSize(12), "end", "hanging", "00:06:35");
+    const start = text(768, 512 + fixedSize(12), "end", "hanging", "00:06:35");
     control.append(start);
-    const end = text("end", 2768, 512 + fixedSize(12), "start", "hanging", "00:07:02");
+    const end = text(2768, 512 + fixedSize(12), "start", "hanging", "00:07:02");
     control.append(end);
     const selectionLeft = start.getBBox().x + start.getBBox().width + fixedSize(12);
     const selectionWidth = end.getBBox().x - fixedSize(12) - selectionLeft;
@@ -247,19 +240,65 @@ function appendTimeControl(svg) {
         width: `${selectionWidth}`,
         height: `${controlHeight}`,
         fill: "#a8def0",
-        stroke: "#7f7f7f"
+        stroke: "#7f7f7f",
     });
-    appendSvgElement(control, "rect", {
+    const cursorInSvg = e => {
+        var point = svg.createSVGPoint();
+        point.x = e.clientX;
+        point.y = e.clientY;
+        return point.matrixTransform(svg.getScreenCTM().inverse());
+    };
+    var activeHandle = null;
+    document.addEventListener("mousemove", e => {
+        if (activeHandle) {
+            const cursor = cursorInSvg(e);
+            activeHandle.element.setAttribute("x", `${activeHandle.bbox.x + cursor.x - activeHandle.down.x}`);
+            //console.log(`x = ${point.x}, y = ${point.y}`)
+        }
+    });
+    const makeHandle = (element, getLeftBound, getRightBound) => {
+        element.addEventListener("mousedown", e => {
+            const point = cursorInSvg(e);
+            activeHandle = { element,
+                bbox: element.getBBox(),
+                down: point,
+            };
+            console.log(activeHandle);
+        });
+        element.addEventListener("mouseup", e => {
+            activeHandle = null;
+        });
+    };
+    const startHitBox = createSvgElement("rect", {
         x: `${selectionLeft - fixedSize(handleSize)}`,
-        y: `${512 - controlHeight / 2 - fixedSize(handleSize)}`,
+        y: `${512 - controlHeight / 2}`,
         width: `${fixedSize(handleSize * 2)}`,
-        height: `${controlHeight + fixedSize(handleSize * 2)}`,
-        fill: "#78d2f0",
-        stroke: "#7f7f7f"
+        height: `${controlHeight}`,
+        opacity: "0.5",
+        fill: "#ffff00",
+        stroke: "#ffff00",
+        style: "cursor: ew-resize",
     });
+    control.append(startHitBox);
+    const endHitBox = createSvgElement("rect", {
+        x: `${selectionLeft + selectionWidth - fixedSize(handleSize)}`,
+        y: `${512 - controlHeight / 2}`,
+        width: `${fixedSize(handleSize * 2)}`,
+        height: `${controlHeight}`,
+        opacity: "0.5",
+        fill: "#ffff00",
+        stroke: "#ffff00",
+        style: "cursor: w-resize",
+    });
+    control.append(endHitBox);
+    makeHandle(startHitBox);
+    makeHandle(endHitBox);
     // Consider using this for the handles: https://codepen.io/FelixRilling/pen/qzfoc
     // Might need: https://developer.mozilla.org/en-US/docs/Web/SVG/Element/feDropShadow
 }
+
+// Should strace-viewer be named strace-explorer instead? The increasing interactivity might merit this.
+// e.g. glow highlighting process subtrees and allowing them to be hidden
 
 async function fetchFullContext() {
     
