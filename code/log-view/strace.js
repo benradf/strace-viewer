@@ -107,25 +107,27 @@ function render(layout, bbox) {
         colourDistribution.push(elements);
         return elements;
     }));
-    var hue = 0;     // smaller spacer size bases have all processes under a root closer in colour
-    const spacerSize = depth => Math.pow(0.1, depth);
-    const totalSize = colourDistribution.filter(Number.isInteger).map(spacerSize).reduce((x, y) => x + y);
-    colourDistribution.forEach(item => {
-        if (Array.isArray(item)) {
-            item.forEach(element => {
-                switch (element.localName) {
-                    case "rect":
-                        element.setAttribute("fill", rgbHue(hue));
-                        break;
-                    case "line":  // Consider using: https://vanseodesign.com/web-design/svg-linear-gradients/
-                        element.setAttribute("stroke", rgbHue(hue));
-                        break;
-                }
-            });
-        } else {
-            hue += (360 / totalSize) * spacerSize(item);
-        }
-    });
+    if (colourDistribution) {
+        var hue = 0;     // smaller spacer size bases have all processes under a root closer in colour
+        const spacerSize = depth => Math.pow(0.1, depth);
+        const totalSize = colourDistribution.filter(Number.isInteger).map(spacerSize).reduce((x, y) => x + y);
+        colourDistribution.forEach(item => {
+            if (Array.isArray(item)) {
+                item.forEach(element => {
+                    switch (element.localName) {
+                        case "rect":
+                            element.setAttribute("fill", rgbHue(hue));
+                            break;
+                        case "line":  // Consider using: https://vanseodesign.com/web-design/svg-linear-gradients/
+                            element.setAttribute("stroke", rgbHue(hue));
+                            break;
+                    }
+                });
+            } else {
+                hue += (360 / totalSize) * spacerSize(item);
+            }
+        });
+    }
     var graph = createSvgElement("g", { id: "graph" });
     elements.forEach(element => graph.appendChild(element));
     return graph;
@@ -307,8 +309,10 @@ function rangeSelectionControl(svg, { minLabel, maxLabel, getLabelForPercentage,
     }));
     makeHandle({
         getValue: () => start,
-        onPercentageChange: percentage =>
-            start = Math.min(percentage, end),
+        onPercentageChange: percentage => {
+            onChange(start = Math.min(percentage, end), end);
+            return start;
+        },
         label: text(minLabel, "start", {
             "text-anchor": "end",
             "dominant-baseline": "hanging",
@@ -336,8 +340,10 @@ function rangeSelectionControl(svg, { minLabel, maxLabel, getLabelForPercentage,
     });
     makeHandle({
         getValue: () => end,
-        onPercentageChange: percentage =>
-            end = Math.max(start, percentage),
+        onPercentageChange: percentage => {
+            onChange(start, end = Math.max(start, percentage));
+            return end;
+        },
         label: text(maxLabel, "end", {
             "text-anchor": "start",
             "dominant-baseline": "hanging",
@@ -405,7 +411,7 @@ function rangeSelectionControl(svg, { minLabel, maxLabel, getLabelForPercentage,
     return control;
 }
 
-function timeSelectionControl(svg, { min, max, onChange,  }) {
+function timeSelectionControl(svg, { min, max, onChange }) {
     const formatTime = seconds => {
         const part = n => `${Math.floor(n)}`.padStart(2, "0");
         const hours = part(Math.floor(seconds / 3600));
@@ -416,7 +422,7 @@ function timeSelectionControl(svg, { min, max, onChange,  }) {
         minLabel: `${formatTime(min)}`,
         maxLabel: `${formatTime(max)}`,
         getLabelForPercentage: p => formatTime(min + p * (max - min)),
-        onChange: onChange,
+        onChange: (start, end) => onChange(min + start * (max - min), min + end * (max - min)),
     });
 }
 
@@ -433,14 +439,14 @@ async function fetchFullContext() {
     return JSON.parse(await response.text());
 }
 
-async function dataSource() {
+async function dataSource(onLayoutChange) {
     async function fetchData(start, end) {
         var queryParams = [ ];
         if (start != null) {
-            query.push(`start=${toRatio(start)}`);
+            queryParams.push(`start=${toRatio(start)}`);
         }
         if (end != null) {
-            query.push(`end=${toRatio(end)}`);
+            queryParams.push(`end=${toRatio(end)}`);
         }
         var response = await fetch(`/strace/1?${queryParams.join("&")}`);
         if (!response.ok) {
@@ -460,7 +466,7 @@ async function dataSource() {
             }
         }, null);
     const minTime = layout => foldMapNullableRatio(layout, Math.min, row => row[0].key.start);
-    const maxTime = layout => foldMapNullableRatio(layoyt, Math.max, row => row[row.length - 1].key.end);
+    const maxTime = layout => foldMapNullableRatio(layout, Math.max, row => row[row.length - 1].key.end);
     const fullContext = await fetchData();
     /* Things that need controlling:
         - animating the temporal dimension: always update on setTime for smooth lagless feel
@@ -475,6 +481,7 @@ async function dataSource() {
     const setPending = context => state.pending = context;
     const fetchPending = () => {
         fetchData(state.pending.start, state.pending.end).then(layout => {
+            onLayoutChange(layout);
             if (state.pending) {
                 fetchPending();
             } else {
@@ -486,16 +493,25 @@ async function dataSource() {
 
     // TBC: Render time selection and controls for adjusting it.
 
-    const setTime = (start, end, immediate) => {
-        setPending({ start, end });
-        if (!state.active) {
-            window.setTimeout(fetchPending, 1000);
-            state.active = true;
-        }
-    };
+//    const setTime = (start, end, immediate) => {
+//        setPending({ start, end });
+//        if (!state.active) {
+//            window.setTimeout(fetchPending, 1000);
+//            state.active = true;
+//        }
+//    };
 
     return {
-        setStartTime: setTime
+        minTime: minTime(fullContext),
+        maxTime: maxTime(fullContext),
+        setTimeSelection: (start, end, immediate) => {
+            console.log(`start = ${start}, end = ${end}`);
+            setPending({ start, end });
+            if (!state.active) {
+                window.setTimeout(fetchPending, immediate? 0 : 1000);
+                state.active = true;
+            }
+        },
     }
 
 /*
@@ -525,31 +541,43 @@ function animate(duration, action) {
 }
 
 window.onload = function() {
-    const data = dataSource();
     document.body.style.cursor = "default";
     const svg = appendSvgElement(document.body, "svg", {
         version: "2",
         viewBox:  `0 0 ${fullWidth} ${fullHeight}`,
     });
-    const timeControl = timeSelectionControl(svg, {
-        min: fromRatio("3920 % 10"), // 00:06:32
-        max: fromRatio("4350 % 10"), // 00:07:15
-        onChange: () => { },
-    });
-    svg.append(timeControl);
-    fetchLayout().then(layout => {
-        const graph = render(layout, {
+    var graph = null;
+    var timeControl = null;
+    dataSource(layout => {
+        if (graph) {
+            graph.parentNode.removeChild(graph);
+        }
+        graph = render(layout, {
             x: 0,
             y: 0,
             width: fullWidth,
             height: fullHeight - timeControl.getBBox().height,
         });
         svg.appendChild(graph);
-//        animate2(graph, performance.now() + 1000);
-
-
-//        appendTimeControl(svg);
+    }).then(data => {
+        timeControl = timeSelectionControl(svg, {
+            min: fromRatio("3920 % 10"), // 00:06:32
+            max: fromRatio("4350 % 10"), // 00:07:15
+            onChange: (start, end) => data.setTimeSelection(start, end),
+        });
+        svg.append(timeControl);
+        data.setTimeSelection(
+            data.minTime,
+            data.maxTime,
+            true
+        );
     });
+//    fetchLayout().then(layout => {
+////        animate2(graph, performance.now() + 1000);
+//
+//
+////        appendTimeControl(svg);
+//    });
 //    window.setTimeout(function() {
 //      window.location.reload();
 //    }, 1000);
