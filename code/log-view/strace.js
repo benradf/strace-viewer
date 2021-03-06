@@ -1,3 +1,6 @@
+const fullWidth = 4096;
+const fullHeight = 2048;
+
 async function fetchLayout(context) {
     //var response = await fetch("/strace/1?start=400%251&end=401%251");
     var response = await fetch("/strace/1");
@@ -23,8 +26,7 @@ function createSvgElement(name, attributes) {
 
 function appendSvgElement(parent, name, attributes) {
     var element = createSvgElement(name, attributes);
-    parent.appendChild(element);
-    return element;
+    return parent.appendChild(element);
 }
 
 function fromRatio(ratio) {
@@ -47,7 +49,7 @@ function rgbHue(h) {
     return `rgb(${scale(f(0))},${scale(f(8))},${scale(f(4))})`;
 }
 
-function render(layout) {
+function render(layout, bbox) {
     const foldMapNullableRatio = (f, g) =>
         layout.reduce((a, row) => {
             const x = g(row);
@@ -62,19 +64,19 @@ function render(layout) {
     const minBound = foldMapNullableRatio(Math.min, row => row[0].key.start);
     const maxBound = foldMapNullableRatio(Math.max, row => row[row.length - 1].key.end);
     // TODO: Handle either or both bounds being null.
-    const rowHeight = 100 / layout.length;
-    const timeToPercentage = time => 100 * (fromRatio(time) - minBound) / (maxBound - minBound);
+    const rowHeight = bbox.height / layout.length;
+    const timeToPercentage = time => (fromRatio(time) - minBound) / (maxBound - minBound);
     const pendingEdges = { };
     const colourDistribution = [ ];
     const elements = layout.flatMap((row, index) => row.flatMap(node => {
         const { pid, start, end } = node.key;
-        const x = start == null ? 0 : timeToPercentage(start);
-        const width = (end == null ? 100 : timeToPercentage(end)) - x;
+        const x = start == null ? 0.0 : timeToPercentage(start);
+        const width = (end == null ? 1.0 : timeToPercentage(end)) - x;
         var rect = createSvgElement("rect", {
-            x: `${x}%`,
-            width: `${width}%`,
-            y: `${(index + 0.1) * rowHeight}%`,
-            height: `${0.8 * rowHeight}%`,
+            x: `${bbox.x + x * bbox.width}`,
+            width: `${width * bbox.width}`,
+            y: `${bbox.y + (index + 0.1) * rowHeight}`,
+            height: `${0.8 * rowHeight}`,
         });
         rect.dataset.pid = pid;
         rect.dataset.start = start;
@@ -88,6 +90,7 @@ function render(layout) {
                 y1: edge.y1,
                 x2: rect.getAttribute("x"),
                 y2: rect.getAttribute("y"),
+                "stroke-width": "1",
             }));
         }
         node.edges.forEach(edge => {
@@ -96,7 +99,7 @@ function render(layout) {
                 throw new Error("child process has multiple parents");
             }
             pendingEdges[key] = {
-                y1: `${(index + 0.9) * rowHeight}%`,
+                y1: `${bbox.y + (index + 0.9) * rowHeight}`,
                 depth: depth + 1
             };
         });
@@ -168,20 +171,17 @@ function animate2(target, at) {
 }
 
 function rangeSelectionControl(svg, { minLabel, maxLabel, getLabelForPercentage, onChange }) {
-    const debugOpacity = "0.3";
+    //const debugOpacity = 0.2;
+    const debugOpacity = 0.0;
     const rescaleHandlers = [ ];
     const rescale = () => {
-        const fullWidth = 4096;
-        const fullHeight = 2048;
         const actualWidth = svg.getBoundingClientRect().width * window.devicePixelRatio;
         const scale = px => Math.ceil(px * 1920 / actualWidth);
         const padding = scale(12);
-        const textHeight = scale(48);
-        const controlHeight = 2 * (padding + textHeight);
+        const textHeight = scale(36);
+        const controlHeight = 2 * (textHeight + padding);
         const controlTop = fullHeight - controlHeight;
         rescaleHandlers.forEach(f => f({
-            fullWidth,
-            fullHeight,
             textHeight,
             handleWidth: scale(32),
             padding,
@@ -204,65 +204,59 @@ function rangeSelectionControl(svg, { minLabel, maxLabel, getLabelForPercentage,
         });
         return element;
     };
+    responsive("line", {
+        "opacity": "0.0",
+    }, scale => ({
+        "x1": `${0}`,
+        "x2": `${fullWidth}`,
+        "y1": `${scale.controlTop - scale.padding * 4}`,
+        "y2": `${scale.controlTop - scale.padding * 4}`,
+    }));
     responsive("rect", {
         "fill": "#efefef",
         "stroke": "#7f7f7f",
     }, scale => ({
-        "x": "0",
+        "x": `${0}`,
         "y": `${scale.controlTop}`,
-        "width": `${scale.fullWidth}`,
+        "width": `${fullWidth}`,
         "height": `${scale.controlHeight}`,
     }));
-    const text = (content, baseAttributes, calculateAttributes) => {
+    const text = (content, title, baseAttributes, calculateAttributes) => {
+        baseAttributes.style = `
+            cursor: inherit;
+        `;
         const element = responsive("text", baseAttributes, calculateAttributes);
-        element.textContent = content;
+        element.appendChild(createSvgElement("title", { })).append(title);
+        element.append(content);
         return element;
     }
-    const earliest = text(minLabel, {
+    const earliest = text(minLabel, "earliest", {
         "text-anchor": "start",
         "dominant-baseline": "text-top",
         "fill": "#7f7f7f",
     }, scale => ({
         "font-size": `${scale.textHeight}px`,
         "x": `${scale.padding}`,
-        "y": `${scale.controlMidline - scale.padding}`,
+        "y": `${scale.controlMidline - scale.padding / 2}`,
     }));
-    const latest = text(maxLabel, {
+    const latest = text(maxLabel, "latest", {
         "text-anchor": "end",
         "dominant-baseline": "text-top",
         "fill": "#7f7f7f",
     }, scale => ({
         "font-size": `${scale.textHeight}px`,
-        "x": `${scale.fullWidth - scale.padding}`,
-        "y": `${scale.controlMidline - scale.padding}`,
+        "x": `${fullWidth - scale.padding}`,
+        "y": `${scale.controlMidline - scale.padding / 2}`,
     }));
-    const start = text(minLabel, {
-        "text-anchor": "end",
-        "dominant-baseline": "hanging",
-        "fill": "#2f2f2f",
-    }, scale => ({
-        "font-size": `${scale.textHeight}px`,
-        "x": `${768}`,
-        "y": `${scale.controlMidline + scale.padding}`,
-    }));
-    const end = text(maxLabel, {
-        "text-anchor": "start",
-        "dominant-baseline": "hanging",
-        "fill": "#2f2f2f",
-    }, scale => ({
-        "font-size": `${scale.textHeight}px`,
-        "x": `${2768}`,
-        "y": `${scale.controlMidline + scale.padding}`,
-    }));
-    const selectionLeft = scale => start.getBBox().x + start.getBBox().width + scale.padding;
-    const selectionWidth = scale => end.getBBox().x - scale.padding - selectionLeft(scale);
-    responsive("rect", {
-        "fill": "#a8def0",
+    const rightOf = (element, scale) => element.getBBox().x + element.getBBox().width;
+    const selectableRange = responsive("rect", {
+        "opacity": `${0.5 * debugOpacity}`,
+        "fill": "#7f7f7f",
         "stroke": "#7f7f7f",
     }, scale => ({
-        "x": `${selectionLeft(scale)}`,
+        "x": `${rightOf(earliest, scale) + scale.padding}`,
         "y": `${scale.controlMidline - scale.controlHeight / 2}`,
-        "width": `${selectionWidth(scale)}`,
+        "width": `${latest.getBBox().x - rightOf(earliest, scale) - scale.padding * 2}`,
         "height": `${scale.controlHeight}`,
     }));
     const cursorInSvg = e => {
@@ -272,87 +266,146 @@ function rangeSelectionControl(svg, { minLabel, maxLabel, getLabelForPercentage,
         return point.matrixTransform(svg.getScreenCTM().inverse());
     };
     var activeHandle = null;
+    document.addEventListener("mouseup", e => {
+        document.body.style.cursor = "default";
+        activeHandle = null;
+    });
     document.addEventListener("mousemove", e => {
         if (activeHandle) {
-            const cursor = cursorInSvg(e);
-            activeHandle.element.setAttribute("x", `${activeHandle.bbox.x + cursor.x - activeHandle.down.x}`);
-            //console.log(`x = ${point.x}, y = ${point.y}`)
+            const { x } = cursorInSvg(e);
+            const percentage = activeHandle.onPercentageChange(Math.min(1, Math.max(0,
+                activeHandle.downValue + (x - activeHandle.downX) / selectableRange.getBBox().width
+            )));
+            activeHandle.label.textContent = `${getLabelForPercentage(percentage)}`;
+            document.body.style.cursor = activeHandle.hitbox.style.cursor;
+            window.setTimeout(rescale, 0);
         }
     });
-    const makeHandle = (element, getLeftBound, getRightBound) => {
-        element.addEventListener("mousedown", e => {
-            const point = cursorInSvg(e);
-            activeHandle = { element,
-                bbox: element.getBBox(),
-                down: point,
+    const makeHandle = ({ label, hitbox, getValue, onPercentageChange }) => {
+        hitbox.addEventListener("mousedown", e => {
+            const { x } = cursorInSvg(e);
+            activeHandle = {
+                label,
+                hitbox,
+                downX: x,
+                downValue: getValue(),
+                onPercentageChange,
             };
-            console.log(activeHandle);
-        });
-        element.addEventListener("mouseup", e => {
-            activeHandle = null;
         });
     };
-    const startHitBox = responsive("rect", {
-        "opacity": debugOpacity,
-        "fill": "#ffff00",
-        "stroke": "#ffff00",
-        "style": "cursor: ew-resize",
+    const getX = percentage => selectableRange.getBBox().x + percentage * selectableRange.getBBox().width;
+    var start = 0.0, end = 1.0;
+    responsive("rect", {
+        //"fill": "#a8def0",
+        "fill": "#cfcfcf",
+        "stroke": "#7f7f7f",
     }, scale => ({
-        "x": `${selectionLeft(scale) - scale.handleWidth / 2}`,
+        "x": `${getX(start)}`,
         "y": `${scale.controlMidline - scale.controlHeight / 2}`,
-        "width": `${scale.handleWidth}`,
+        "width": `${Math.max(getX(end) - getX(start), 4)}`,
         "height": `${scale.controlHeight}`,
     }));
-    const endHitBox = responsive("rect", {
-        "opacity": debugOpacity,
-        "fill": "#ffff00",
-        "stroke": "#ffff00",
-        "style": "cursor: ew-resize",
-    }, scale => ({
-        "x": `${selectionLeft(scale) + selectionWidth(scale) - scale.handleWidth / 2}`,
-        "y": `${scale.controlMidline - scale.controlHeight / 2}`,
-        "width": `${scale.handleWidth}`,
-        "height": `${scale.controlHeight}`,
-    }));
-    makeHandle(startHitBox);
-    makeHandle(endHitBox);
+    makeHandle({
+        getValue: () => start,
+        onPercentageChange: percentage =>
+            start = Math.min(percentage, end),
+        label: text(minLabel, "start", {
+            "text-anchor": "end",
+            "dominant-baseline": "hanging",
+            "fill": "#2f2f2f",
+        }, scale => ({
+            "font-size": `${scale.textHeight}px`,
+            "x": `${getX(start) - scale.padding}`,
+            "y": `${scale.controlMidline + scale.padding}`,
+        })),
+        hitbox: responsive("rect", {
+            "opacity": `${0.1 * debugOpacity}`,
+            "fill": "#ff0000",
+            "stroke": "#ff0000",
+        }, scale => ({
+            "x": `${0}`,
+            "y": `${scale.controlMidline - scale.controlHeight / 2}`,
+            "width": `${getX(start) + (getX(end) - getX(start)) / 2}`,
+            "height": `${scale.controlHeight}`,
+            "style": `cursor: ${
+                start == 0.0 ? "e-resize" :
+                start == end ? "w-resize" :
+                               "ew-resize"
+            }`,
+        })),
+    });
+    makeHandle({
+        getValue: () => end,
+        onPercentageChange: percentage =>
+            end = Math.max(start, percentage),
+        label: text(maxLabel, "end", {
+            "text-anchor": "start",
+            "dominant-baseline": "hanging",
+            "fill": "#2f2f2f",
+        }, scale => ({
+            "font-size": `${scale.textHeight}px`,
+            "x": `${getX(end) + scale.padding}`,
+            "y": `${scale.controlMidline + scale.padding}`,
+        })),
+        hitbox: responsive("rect", {
+            "opacity": `${0.1 * debugOpacity}`,
+            "fill": "#ffff00",
+            "stroke": "#ffff00",
+        }, scale => ({
+            "x": `${getX(end) - (getX(end) - getX(start)) / 2}`,
+            "y": `${scale.controlMidline - scale.controlHeight / 2}`,
+            "width": `${fullWidth - getX(end) + (getX(end) - getX(start)) / 2}`,
+            "height": `${scale.controlHeight}`,
+            "style": `cursor: ${
+                end == start ? "e-resize" :
+                end == 1.0   ? "w-resize" :
+                               "ew-resize"
+            }`,
+        })),
+    });
+    //
+    // TBC: Use start and end elements as canonical selection range
+    // On mousemove event:
+    //  1. move the active element (start or end)
+    //  2. rescale the rest of the timer control
+    //  3. raise onChange event with start and end derived percentage
+    //
     // Consider using this for the handles: https://codepen.io/FelixRilling/pen/qzfoc
     // Might need: https://developer.mozilla.org/en-US/docs/Web/SVG/Element/feDropShadow
-
     responsive("line", {
-        "stroke": "#ff3f3f",
+        "stroke": "#3f3f3f",
         "stroke-width": "2",
-        "opacity": `${debugOpacity}`,
+        "opacity": `${1.0 * debugOpacity}`,
     }, scale => ({
         "x1": "0",
         "y1": `${scale.controlMidline}`,
-        "x2": "4096",
+        "x2": `${fullWidth}`,
         "y2": `${scale.controlMidline}`,
     }));
     responsive("line", {
-        "stroke": "#ff3f3f",
+        "stroke": "#3f3f3f",
         "stroke-width": "2",
-        "opacity": `${debugOpacity}`,
+        "opacity": `${1.0 * debugOpacity}`,
     }, scale => ({
         "x1": "0",
         "y1": `${scale.controlMidline - scale.controlHeight / 4}`,
-        "x2": "4096",
+        "x2": `${fullWidth}`,
         "y2": `${scale.controlMidline - scale.controlHeight / 4}`,
     }));
     responsive("line", {
-        "stroke": "#ff3f3f",
+        "stroke": "#3f3f3f",
         "stroke-width": "2",
-        "opacity": `${debugOpacity}`,
+        "opacity": `${1.0 * debugOpacity}`,
     }, scale => ({
         "x1": "0",
         "y1": `${scale.controlMidline + scale.controlHeight / 4}`,
-        "x2": "4096",
+        "x2": `${fullWidth}`,
         "y2": `${scale.controlMidline + scale.controlHeight / 4}`,
     }));
     return control;
 }
 
-function timeSelectionControl(svg, { min, max, onChange }) {
+function timeSelectionControl(svg, { min, max, onChange,  }) {
     const formatTime = seconds => {
         const part = n => `${Math.floor(n)}`.padStart(2, "0");
         const hours = part(Math.floor(seconds / 3600));
@@ -362,143 +415,9 @@ function timeSelectionControl(svg, { min, max, onChange }) {
     return rangeSelectionControl(svg, {
         minLabel: `${formatTime(min)}`,
         maxLabel: `${formatTime(max)}`,
-        getLabelForPercentage: p => formatTime(p * 86400),
+        getLabelForPercentage: p => formatTime(min + p * (max - min)),
         onChange: onChange,
     });
-}
-
-function appendTimeControl(svg) {
-    const handleSize = 16;
-    const textHeight = 48;
-    const debugOpacity = 0.2;
-    const control = createSvgElement("g", { });
-    svg.append(control);
-//    const style = createSvgElement("style", { });
-//    style.textContent = `
-//
-//    `;
-//    control.append(style);
-    const actualWidth = svg.getBoundingClientRect().width * window.devicePixelRatio;
-    const fixedSize = px => Math.ceil(px * 1920 / actualWidth);
-    const text = (x, y, anchor, baseline, content) => {
-        const element = createSvgElement("text", { x, y,
-            "text-anchor": anchor,
-            "dominant-baseline": baseline,
-            "font-size": `${fixedSize(textHeight)}px`,
-            "fill": "#2f2f2f",
-        });
-        element.textContent = content;
-        return element;
-    }
-    const baselineOffset = 12;
-    const controlHeight = fixedSize(2 * (baselineOffset + textHeight));
-    appendSvgElement(control, "rect", {
-        x: "0",
-        y: `${512 - controlHeight / 2}`,
-        width: "4096",
-        height: `${controlHeight}`,
-        fill: "#efefef",
-        stroke: "#7f7f7f",
-    });
-    control.append(appendSvgElement(svg, "line", {
-        x1: "0",
-        y1: "512",
-        x2: "4096",
-        y2: "512",
-        stroke: "#3f3f3f",
-        "stroke-width": "3",
-        "stroke-dasharray": "16 4",
-        opacity: debugOpacity,
-    }));
-    control.append(appendSvgElement(svg, "line", {
-        x1: "0",
-        y1: `${512 - controlHeight / 4}`,
-        x2: "4096",
-        y2: `${512 - controlHeight / 4}`,
-        stroke: "#ff3f3f",
-        "stroke-width": "3",
-        opacity: debugOpacity,
-    }));
-    control.append(appendSvgElement(svg, "line", {
-        x1: "0",
-        y1: `${512 + controlHeight / 4}`,
-        x2: "4096",
-        y2: `${512 + controlHeight / 4}`,
-        stroke: "#3fff3f",
-        "stroke-width": "3",
-        opacity: debugOpacity,
-    }));
-    const earliest = text(fixedSize(12), 512 - fixedSize(12), "start", "text-top", "00:06:32");
-    control.append(earliest);
-    const latest = text(4096 - fixedSize(12), 512 - fixedSize(12), "end", "text-top", "00:07:15");
-    control.append(latest);
-    const start = text(768, 512 + fixedSize(12), "end", "hanging", "00:06:35");
-    control.append(start);
-    const end = text(2768, 512 + fixedSize(12), "start", "hanging", "00:07:02");
-    control.append(end);
-    const selectionLeft = start.getBBox().x + start.getBBox().width + fixedSize(12);
-    const selectionWidth = end.getBBox().x - fixedSize(12) - selectionLeft;
-    appendSvgElement(control, "rect", {
-        x: `${selectionLeft}`,
-        y: `${512 - controlHeight / 2}`,
-        width: `${selectionWidth}`,
-        height: `${controlHeight}`,
-        fill: "#a8def0",
-        stroke: "#7f7f7f",
-    });
-    const cursorInSvg = e => {
-        var point = svg.createSVGPoint();
-        point.x = e.clientX;
-        point.y = e.clientY;
-        return point.matrixTransform(svg.getScreenCTM().inverse());
-    };
-    var activeHandle = null;
-    document.addEventListener("mousemove", e => {
-        if (activeHandle) {
-            const cursor = cursorInSvg(e);
-            activeHandle.element.setAttribute("x", `${activeHandle.bbox.x + cursor.x - activeHandle.down.x}`);
-            //console.log(`x = ${point.x}, y = ${point.y}`)
-        }
-    });
-    const makeHandle = (element, getLeftBound, getRightBound) => {
-        element.addEventListener("mousedown", e => {
-            const point = cursorInSvg(e);
-            activeHandle = { element,
-                bbox: element.getBBox(),
-                down: point,
-            };
-            console.log(activeHandle);
-        });
-        element.addEventListener("mouseup", e => {
-            activeHandle = null;
-        });
-    };
-    const startHitBox = createSvgElement("rect", {
-        x: `${selectionLeft - fixedSize(handleSize)}`,
-        y: `${512 - controlHeight / 2}`,
-        width: `${fixedSize(handleSize * 2)}`,
-        height: `${controlHeight}`,
-        opacity: debugOpacity,
-        fill: "#ffff00",
-        stroke: "#ffff00",
-        style: "cursor: ew-resize",
-    });
-    control.append(startHitBox);
-    const endHitBox = createSvgElement("rect", {
-        x: `${selectionLeft + selectionWidth - fixedSize(handleSize)}`,
-        y: `${512 - controlHeight / 2}`,
-        width: `${fixedSize(handleSize * 2)}`,
-        height: `${controlHeight}`,
-        opacity: debugOpacity,
-        fill: "#ffff00",
-        stroke: "#ffff00",
-        style: "cursor: w-resize",
-    });
-    control.append(endHitBox);
-    makeHandle(startHitBox);
-    makeHandle(endHitBox);
-    // Consider using this for the handles: https://codepen.io/FelixRilling/pen/qzfoc
-    // Might need: https://developer.mozilla.org/en-US/docs/Web/SVG/Element/feDropShadow
 }
 
 // Should strace-viewer be named strace-explorer instead? The increasing interactivity might merit this.
@@ -607,21 +526,27 @@ function animate(duration, action) {
 
 window.onload = function() {
     const data = dataSource();
-    var svg = appendSvgElement(document.body, "svg", {
+    document.body.style.cursor = "default";
+    const svg = appendSvgElement(document.body, "svg", {
         version: "2",
-        viewBox:  "0 0 4096 2048",
-        //style: "background: black;"
+        viewBox:  `0 0 ${fullWidth} ${fullHeight}`,
     });
+    const timeControl = timeSelectionControl(svg, {
+        min: fromRatio("3920 % 10"), // 00:06:32
+        max: fromRatio("4350 % 10"), // 00:07:15
+        onChange: () => { },
+    });
+    svg.append(timeControl);
     fetchLayout().then(layout => {
-        const graph = render(layout);
-//        svg.appendChild(graph);
+        const graph = render(layout, {
+            x: 0,
+            y: 0,
+            width: fullWidth,
+            height: fullHeight - timeControl.getBBox().height,
+        });
+        svg.appendChild(graph);
 //        animate2(graph, performance.now() + 1000);
 
-        svg.append(timeSelectionControl(svg, {
-            min: fromRatio("3920 % 10"), // 00:06:32
-            max: fromRatio("4350 % 10"), // 00:07:15
-            onChange: () => { },
-        }));
 
 //        appendTimeControl(svg);
     });
