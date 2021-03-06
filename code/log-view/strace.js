@@ -167,10 +167,98 @@ function animate2(target, at) {
     });
 }
 
-function renderTimeAxis() {
-    var axis = createSvgElement("g", { });
-    
-    return axis;
+function appendTimeControl(svg) {
+    const handleSize = 4;
+    const textHeight = 48;
+    const control = createSvgElement("g", { });
+    svg.append(control);
+//    const style = createSvgElement("style", { });
+//    style.textContent = `
+//        @keyframes selectionGlow {
+//            from {
+//                box-shadow: ${handleSize}px ${handleSize}px 0px 0px #00b4f0;
+//            }
+//            to {
+//                box-shadow: ${2*handleSize}px ${2*handleSize}px 0px 0px #00b4f0;
+//            }
+//        }
+//    `;
+//    control.append(style);
+    const actualWidth = svg.getBoundingClientRect().width * window.devicePixelRatio;
+    const fixedSize = px => Math.ceil(px * 1920 / actualWidth);
+    const text = (id, x, y, anchor, baseline, content) => {
+        const element = createSvgElement("text", { id, x, y,
+            "text-anchor": anchor,
+            "dominant-baseline": baseline,
+            "font-size": `${fixedSize(textHeight)}px`,
+            "fill": "#2f2f2f"
+        });
+        element.textContent = content;
+        return element;
+    }
+    const baselineOffset = 12;
+    const controlHeight = fixedSize(2 * (baselineOffset + textHeight));
+    appendSvgElement(control, "rect", {
+        x: "0",
+        y: `${512 - controlHeight / 2}`,
+        width: "4096",
+        height: `${controlHeight}`,
+        fill: "#efefef",
+        stroke: "#7f7f7f"
+    });
+    control.append(appendSvgElement(svg, "line", {
+        x1: "0",
+        y1: "512",
+        x2: "4096",
+        y2: "512",
+        stroke: "#3f3f3f",
+        "stroke-width": "3",
+        "stroke-dasharray": "16 4"
+    }));
+    control.append(appendSvgElement(svg, "line", {
+        x1: "0",
+        y1: `${512 - controlHeight / 4}`,
+        x2: "4096",
+        y2: `${512 - controlHeight / 4}`,
+        stroke: "#ff3f3f",
+        "stroke-width": "3",
+    }));
+    control.append(appendSvgElement(svg, "line", {
+        x1: "0",
+        y1: `${512 + controlHeight / 4}`,
+        x2: "4096",
+        y2: `${512 + controlHeight / 4}`,
+        stroke: "#3fff3f",
+        "stroke-width": "3",
+    }));
+    const earliest = text("earliest", 0, 512 - fixedSize(12), "start", "text-top", "00:06:32");
+    control.append(earliest);
+    const latest = text("latest", 4096, 512 - fixedSize(12), "end", "text-top", "00:07:15");
+    control.append(latest);
+    const start = text("start", 768, 512 + fixedSize(12), "end", "hanging", "00:06:35");
+    control.append(start);
+    const end = text("end", 2768, 512 + fixedSize(12), "start", "hanging", "00:07:02");
+    control.append(end);
+    const selectionLeft = start.getBBox().x + start.getBBox().width + fixedSize(12);
+    const selectionWidth = end.getBBox().x - fixedSize(12) - selectionLeft;
+    appendSvgElement(control, "rect", {
+        x: `${selectionLeft}`,
+        y: `${512 - controlHeight / 2}`,
+        width: `${selectionWidth}`,
+        height: `${controlHeight}`,
+        fill: "#a8def0",
+        stroke: "#7f7f7f"
+    });
+    appendSvgElement(control, "rect", {
+        x: `${selectionLeft - fixedSize(handleSize)}`,
+        y: `${512 - controlHeight / 2 - fixedSize(handleSize)}`,
+        width: `${fixedSize(handleSize * 2)}`,
+        height: `${controlHeight + fixedSize(handleSize * 2)}`,
+        fill: "#78d2f0",
+        stroke: "#7f7f7f"
+    });
+    // Consider using this for the handles: https://codepen.io/FelixRilling/pen/qzfoc
+    // Might need: https://developer.mozilla.org/en-US/docs/Web/SVG/Element/feDropShadow
 }
 
 async function fetchFullContext() {
@@ -234,6 +322,8 @@ async function dataSource() {
         state.pending = null;
     };
 
+    // TBC: Render time selection and controls for adjusting it.
+
     const setTime = (start, end, immediate) => {
         setPending({ start, end });
         if (!state.active) {
@@ -242,11 +332,9 @@ async function dataSource() {
         }
     };
 
-//    return {
-//        setStartTime: setTime
-//    }
-
-    return state;
+    return {
+        setStartTime: setTime
+    }
 
 /*
         setStartTime(time, immediate)
@@ -283,34 +371,10 @@ window.onload = function() {
     });
     fetchLayout().then(layout => {
         const graph = render(layout);
-        svg.appendChild(graph);
-        animate2(graph, performance.now() + 1000);
-        svg.appendChild(renderTimeAxis());
+//        svg.appendChild(graph);
+//        animate2(graph, performance.now() + 1000);
+        appendTimeControl(svg);
     });
-/*
-    var rect = appendSvgElement(svg, "rect", {
-        x: "100",
-        y: "100",
-        width: "3896",
-        height: "1848",
-        fill: "#3bc460"
-    });
-    rect.dataset.foo = "bar"
-    var rect = appendSvgElement(svg, "rect", {
-        x: "0",
-        y: "2000",
-        width: "4096",
-        height: "48",
-        fill: "#ebeff5"
-    });
-    var rect = appendSvgElement(svg, "rect", {
-        x: "2200",
-        y: "2000",
-        width: "912",
-        height: "48",
-        fill: "#2ec7ff"
-    });
-*/
 //    window.setTimeout(function() {
 //      window.location.reload();
 //    }, 1000);
