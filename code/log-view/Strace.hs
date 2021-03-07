@@ -560,6 +560,20 @@ insert database entries = do
       exits = filterEntries $ \case
         StraceExit exit -> Just exit
         _ -> Nothing
+      processes = Map.toList $ Map.fromListWith (&&) $ filterEntries $ \case
+        StraceSyscall Syscall{..}
+          | syscallName == "clone" -> Just (read $ Text.unpack syscallReturn, False)
+          | otherwise -> Just (syscallPid, True)
+        _ -> Nothing
+  for processes $ \case
+      (pid, True) -> executeSql database
+        [ "INSERT INTO process (pid, root) VALUES (? , true)"
+        , "ON CONFLICT DO NOTHING;"
+        ] [ SQLInteger $ fromIntegral pid ]
+      (pid, False) -> executeSql database
+        [ "INSERT INTO process (pid, root) VALUES (?, false)"
+        , "ON CONFLICT (pid) DO UPDATE SET root = false;"
+        ] [ SQLInteger $ fromIntegral pid ]
   batchInsert database "syscall" [ "pid", "time", "name", "args", "return" ] $
     syscalls <&> \Syscall{..} ->
       [ SQLInteger $ fromIntegral syscallPid
@@ -611,6 +625,12 @@ createSchema database = executeStatements database
     , "  type TEXT"
     , ");"
     ]
+  , [ "CREATE TABLE IF NOT EXISTS process ("
+    , "  pid INTEGER,"
+    , "  root INTEGER,"
+    , "  PRIMARY KEY(pid)"
+    , ");"
+    ]
   , [ "CREATE INDEX IF NOT EXISTS syscall_pid_time ON syscall (pid, time);" ]
   , [ "CREATE INDEX IF NOT EXISTS syscall_name ON syscall (name);" ]
   , [ "CREATE INDEX IF NOT EXISTS syscall_return_name ON syscall (return, name);" ]
@@ -636,9 +656,9 @@ createSchema database = executeStatements database
 {-
     n=100000
     rm -vf /tmp/strace-replication.sqlite &&
-    m=0; while [[ $m -lt 10000000 ]]; do
+    m=0; time while [[ $m -lt 10000000 ]]; do
       printf "$((m + 1)) .. "
-      result/bin/load-strace /tmp/strace-replication $n $m 1>/dev/null
+      /bin/load-strace /tmp/strace-replication $n $m 1>/dev/null
       m=$((m + n))
       printf "\033[0;32m$m\033[0m\n"
     done
