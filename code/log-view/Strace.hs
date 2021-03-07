@@ -21,6 +21,7 @@ module Strace
   , processes
   ) where
 
+import Control.Exception (finally)
 import Data.Attoparsec.ByteString.Char8 (Parser)
 import qualified Data.Attoparsec.ByteString.Char8 as Parser
 import qualified Data.ByteString.Char8 as ByteString
@@ -56,7 +57,6 @@ import qualified Lucid.Html5 as Html
 import qualified Sqlite
 import Sqlite hiding (withDatabase)
 import System.Directory (createDirectoryIfMissing, doesFileExist)
-import System.Environment (getArgs)
 import System.IO (IOMode(..), withFile)
 import System.IO (hPutStrLn)
 import System.Posix.Types (ProcessID)
@@ -542,9 +542,9 @@ fullContext database = do
     "
 -}
 
-load :: IO ()
-load = withDatabase "/tmp/strace.sqlite" $ \database _ -> do
-  loadLogs >>= \case
+load :: FilePath -> Int -> IO ()
+load path n = withDatabase (path <> ".sqlite") $ \database _ -> do
+  loadLogs path n >>= \case
     Left e -> error e
     Right entries -> insert database entries
 
@@ -623,16 +623,18 @@ createSchema database = executeStatements database
 --layout :: [Process] -> [[Process]]
 --layout = error "not implemented"
 
-loadLogs :: IO (Either String [StraceEntry])
-loadLogs = do
-  let spec = (proc "strace-log-merge" [ "var/log/strace/process" ])
-        { std_in = NoStream , std_out = CreatePipe , std_err = CreatePipe }
-  withCreateProcess spec $ \_ (Just output) _ _ -> do
-    n <- read . head <$> getArgs
-    lines <- take n . ByteString.lines <$> ByteString.hGetContents output
+--  let spec = (proc "strace-log-merge" [ "/tmp/strace/process" ])
+--        { std_in = NoStream , std_out = CreatePipe , std_err = CreatePipe }
+--  withCreateProcess spec $ \_ (Just output) (Just error) _ -> do
+--    --n <- read . head <$> getArgs
+
+loadLogs :: FilePath -> Int -> IO (Either String [StraceEntry])
+loadLogs path n = do
+    lines <- take n . ByteString.lines <$> ByteString.readFile path
     putStrLn $ show (length lines) <> " lines read"
     results <- for lines $ \line ->
-      pure (Parser.parseOnly parser line) -- `finally` ByteString.putStrLn line
+      pure (Parser.parseOnly parser line)
+        -- `finally` ByteString.putStrLn line
     pure $ sequenceA results
 
 data StraceEntry
@@ -675,12 +677,23 @@ parser = do
               , mconcat <$> Parser.many' ((<>) <$> arguments <*> consumeNonParens)
               , Parser.char ')' $> ")"
               ]
-        syscallArgs <- decodeUtf8 <$> arguments
-        Parser.skipSpace
-        Parser.char '='
-        Parser.skipSpace
-        syscallReturn <- Text.pack <$> Parser.many' Parser.anyChar
-        pure Syscall{..}
+        Parser.choice
+          [ do
+              syscallArgs <- decodeUtf8 <$> mconcat <$> sequenceA
+                [ Parser.char '(' $> "("
+                , ByteString.pack <$> Parser.many' (Parser.notChar '<')
+                , Parser.string "<detached ...>"
+                ]
+              let syscallReturn = ""
+              pure Syscall{..}
+          , do
+              syscallArgs <- decodeUtf8 <$> arguments
+              Parser.skipSpace
+              Parser.char '='
+              Parser.skipSpace
+              syscallReturn <- Text.pack <$> Parser.many' Parser.anyChar
+              pure Syscall{..}
+          ]
     , StraceExit <$> do
         Parser.string "+++ "
         value <- Parser.choice

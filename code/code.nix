@@ -11,8 +11,8 @@ mkDerivation {
   isLibrary = true;
   isExecutable = true;
   libraryHaskellDepends = [
-    base binary bytestring direct-sqlite directory http-client
-    http-types process text time transformers unix wai warp
+    base binary bytestring containers direct-sqlite directory
+    http-client http-types process text time transformers unix wai warp
   ];
   executableHaskellDepends = [
     attoparsec base binary bytestring containers direct-sqlite

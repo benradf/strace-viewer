@@ -49,9 +49,9 @@ function rgbHue(h) {
     return `rgb(${scale(f(0))},${scale(f(8))},${scale(f(4))})`;
 }
 
-function render(layout, bbox) {
+function render(data, bbox) {
     const foldMapNullableRatio = (f, g) =>
-        layout.reduce((a, row) => {
+        data.layout.reduce((a, row) => {
             const x = g(row);
             if (x == null) {
                 return a;
@@ -61,14 +61,14 @@ function render(layout, bbox) {
                 return f(a, fromRatio(x));
             }
         }, null);
-    const minBound = foldMapNullableRatio(Math.min, row => row[0].key.start);
-    const maxBound = foldMapNullableRatio(Math.max, row => row[row.length - 1].key.end);
+//    const minBound = foldMapNullableRatio(Math.min, row => row[0].key.start);
+//    const maxBound = foldMapNullableRatio(Math.max, row => row[row.length - 1].key.end);
     // TODO: Handle either or both bounds being null.
-    const rowHeight = bbox.height / layout.length;
-    const timeToPercentage = time => (fromRatio(time) - minBound) / (maxBound - minBound);
+    const rowHeight = bbox.height / data.layout.length;
+    const timeToPercentage = time => (fromRatio(time) - data.start) / (data.end - data.start);
     const pendingEdges = { };
     const colourDistribution = [ ];
-    const elements = layout.flatMap((row, index) => row.flatMap(node => {
+    const elements = data.layout.flatMap((row, index) => row.flatMap(node => {
         const { pid, start, end } = node.key;
         const x = start == null ? 0.0 : timeToPercentage(start);
         const width = (end == null ? 1.0 : timeToPercentage(end)) - x;
@@ -107,7 +107,7 @@ function render(layout, bbox) {
         colourDistribution.push(elements);
         return elements;
     }));
-    if (colourDistribution) {
+    if (colourDistribution.length > 0) {
         var hue = 0;     // smaller spacer size bases have all processes under a root closer in colour
         const spacerSize = depth => Math.pow(0.1, depth);
         const totalSize = colourDistribution.filter(Number.isInteger).map(spacerSize).reduce((x, y) => x + y);
@@ -117,6 +117,7 @@ function render(layout, bbox) {
                     switch (element.localName) {
                         case "rect":
                             element.setAttribute("fill", rgbHue(hue));
+                            element.setAttribute("stroke", rgbHue(hue));
                             break;
                         case "line":  // Consider using: https://vanseodesign.com/web-design/svg-linear-gradients/
                             element.setAttribute("stroke", rgbHue(hue));
@@ -439,7 +440,7 @@ async function fetchFullContext() {
     return JSON.parse(await response.text());
 }
 
-async function dataSource(onLayoutChange) {
+async function fetchLoop(onLayoutChange) {
     async function fetchData(start, end) {
         var queryParams = [ ];
         if (start != null) {
@@ -465,9 +466,9 @@ async function dataSource(onLayoutChange) {
                 return f(a, fromRatio(x));
             }
         }, null);
-    const minTime = layout => foldMapNullableRatio(layout, Math.min, row => row[0].key.start);
-    const maxTime = layout => foldMapNullableRatio(layout, Math.max, row => row[row.length - 1].key.end);
     const fullContext = await fetchData();
+    const minTime = foldMapNullableRatio(fullContext, Math.min, row => row[0].key.start);
+    const maxTime = foldMapNullableRatio(fullContext, Math.max, row => row[row.length - 1].key.end);
     /* Things that need controlling:
         - animating the temporal dimension: always update on setTime for smooth lagless feel
         - requesting new layout: wait 1000ms before initiating a fetch and only have one fetch in progress at any moment
@@ -480,8 +481,10 @@ async function dataSource(onLayoutChange) {
     const state = { active: false };
     const setPending = context => state.pending = context;
     const fetchPending = () => {
-        fetchData(state.pending.start, state.pending.end).then(layout => {
-            onLayoutChange(layout);
+        const start = state.pending.start;
+        const end = state.pending.end;
+        fetchData(start, end).then(layout => {
+            onLayoutChange({ layout, start, end });
             if (state.pending) {
                 fetchPending();
             } else {
@@ -502,13 +505,13 @@ async function dataSource(onLayoutChange) {
 //    };
 
     return {
-        minTime: minTime(fullContext),
-        maxTime: maxTime(fullContext),
+        minTime,
+        maxTime,
         setTimeSelection: (start, end, immediate) => {
             console.log(`start = ${start}, end = ${end}`);
             setPending({ start, end });
             if (!state.active) {
-                window.setTimeout(fetchPending, immediate? 0 : 1000);
+                window.setTimeout(fetchPending, immediate? 0 : 100);
                 state.active = true;
             }
         },
@@ -548,29 +551,24 @@ window.onload = function() {
     });
     var graph = null;
     var timeControl = null;
-    dataSource(layout => {
+    fetchLoop(data => {
         if (graph) {
             graph.parentNode.removeChild(graph);
         }
-        graph = render(layout, {
+        graph = render(data, {
             x: 0,
             y: 0,
             width: fullWidth,
             height: fullHeight - timeControl.getBBox().height,
         });
         svg.appendChild(graph);
-    }).then(data => {
-        timeControl = timeSelectionControl(svg, {
-            min: fromRatio("3920 % 10"), // 00:06:32
-            max: fromRatio("4350 % 10"), // 00:07:15
-            onChange: (start, end) => data.setTimeSelection(start, end),
-        });
-        svg.append(timeControl);
-        data.setTimeSelection(
-            data.minTime,
-            data.maxTime,
-            true
-        );
+    }).then(source => {
+        source.setTimeSelection(source.minTime, source.maxTime, true);
+        svg.append(timeControl = timeSelectionControl(svg, {
+            min: source.minTime,
+            max: source.maxTime,
+            onChange: (start, end) => source.setTimeSelection(start, end),
+        }));
     });
 //    fetchLayout().then(layout => {
 ////        animate2(graph, performance.now() + 1000);

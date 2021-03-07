@@ -129,3 +129,36 @@ executable test-log-view
     log-view
   other-modules:
     Strace
+
+executable load-strace
+  default-language: Haskell2010
+  main-is: Main.hs
+  build-depends:
+    attoparsec,
+    base,
+    binary,
+    bytestring,
+    code,
+    containers,
+    direct-sqlite,
+    directory,
+    file-embed,
+    http-types,
+    process,
+    random,
+    lucid,
+    lucid-svg,
+    text,
+    time,
+    transformers,
+    unix,
+    wai,
+    warp
+  ghc-options:
+    -fwarn-unused-imports
+    -threaded
+  hs-source-dirs:
+    load-strace
+    log-view
+  other-modules:
+    Strace
