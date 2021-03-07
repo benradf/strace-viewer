@@ -13,13 +13,16 @@ main :: HasCallStack => IO ()
 main = do
   setLineBuffering
   log ansiWhite "log-view service started"
-  Strace.withDatabase "/data/strace.sqlite" $ \database _ -> server database
+  Strace.withDatabase "/data/strace.sqlite" server
   log ansiWhite "log-view service stopped"
 
-server :: HasCallStack => Database -> IO ()
-server database = listen 8083 $ \method request -> case pathInfo request of
-  "strace" : _ -> Strace.route database method request
-  [] -> pure $ if method == GET
-    then ok Nothing ""
-    else methodNotAllowed Nothing ""
-  _ -> pure $ notFound Nothing ""
+server :: HasCallStack => Database -> IO () -> IO ()
+server database interrupt = listenWithShutdown 8083 (shutdown interrupt) $
+  \method request -> case pathInfo request of
+    "strace" : _ -> Strace.route database method request
+    [] -> pure $ if method == GET
+      then ok Nothing ""
+      else methodNotAllowed Nothing ""
+    _ -> pure $ notFound Nothing ""
+  where
+    shutdown interrupt exit = onTerminate $ interrupt *> exit
