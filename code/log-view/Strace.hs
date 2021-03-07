@@ -542,9 +542,9 @@ fullContext database = do
     "
 -}
 
-load :: FilePath -> Int -> IO ()
-load path n = withDatabase (path <> ".sqlite") $ \database _ -> do
-  loadLogs path n >>= \case
+load :: FilePath -> Int -> Int -> IO ()
+load path n m = withDatabase (path <> ".sqlite") $ \database _ -> do
+  loadLogs path n m >>= \case
     Left e -> error e
     Right entries -> insert database entries
 
@@ -628,9 +628,51 @@ createSchema database = executeStatements database
 --  withCreateProcess spec $ \_ (Just output) (Just error) _ -> do
 --    --n <- read . head <$> getArgs
 
-loadLogs :: FilePath -> Int -> IO (Either String [StraceEntry])
-loadLogs path n = do
-    lines <- take n . ByteString.lines <$> ByteString.readFile path
+-- TODO: If possible do not split strace into multiple files only to be merged later.
+-- Output it to a single file. Then have a process batch read lines and pass them to load-strace.
+-- Even better: keep (n, m) as state and run load-strace directly on strace output.
+-- It can be implemented as personality of load-strace when it is run without arguments.
+
+{-
+    n=100000
+    m=0
+    while [[ $m -lt 3000000 ]]; do
+      result/bin/load-strace /tmp/strace-replication $n $m 1>/dev/null
+      m=$((m + n))
+      echo -e "\033[0;32m$m\033[0m"
+    done
+-}
+
+{-
+    100000
+    200000
+    300000
+    400000
+    500000
+    600000
+    700000
+    800000
+    900000
+    1000000
+    1100000
+    load-strace: Failed reading: empty
+    CallStack (from HasCallStack):
+      error, called at log-view/Strace.hs:610:15 in main:Strace
+    1200000
+    load-strace: Failed reading: empty
+    CallStack (from HasCallStack):
+      error, called at log-view/Strace.hs:610:15 in main:Strace
+    1300000
+    1400000
+    1500000
+    1600000
+    1700000
+    1800000
+-}
+
+loadLogs :: FilePath -> Int -> Int -> IO (Either String [StraceEntry])
+loadLogs path n m = do
+    lines <- take n . drop m . ByteString.lines <$> ByteString.readFile path
     putStrLn $ show (length lines) <> " lines read"
     results <- for lines $ \line ->
       pure (Parser.parseOnly parser line)
@@ -682,7 +724,10 @@ parser = do
               syscallArgs <- decodeUtf8 <$> mconcat <$> sequenceA
                 [ Parser.char '(' $> "("
                 , ByteString.pack <$> Parser.many' (Parser.notChar '<')
-                , Parser.string "<detached ...>"
+                , Parser.choice
+                    [ Parser.string "<detached ...>"
+                    , Parser.string "<unfinished ...>"
+                    ]
                 ]
               let syscallReturn = ""
               pure Syscall{..}
