@@ -41,6 +41,16 @@ main = Tasty.defaultMain $
           , syscallReturn = "832"
           }
         )
+    , HUnit.testCase "parse StraceSyscall question marks" $ assertParse
+        "1919  22:15:03.957958 ????()                  = ?"
+        (Right $ StraceSyscall $ Syscall
+          { syscallPid = 1919
+          , syscallTime = TimeOfDay 22 15 03.957958
+          , syscallName = "????"
+          , syscallArgs = "()"
+          , syscallReturn = "?"
+          }
+        )
     , HUnit.testCase "parse StraceSignal" $ assertParse
         "1135  19:46:39.124117 --- SIGTERM {si_signo=SIGTERM, si_code=SI_USER, si_pid=1134, si_uid=0} ---"
         (Right $ StraceSignal $ Signal
@@ -87,3 +97,5 @@ main = Tasty.defaultMain $
     assertParse string expected =
       HUnit.assertEqual "unexpected parse" expected $
       Parser.parseOnly Strace.parser string
+
+-- $> Main.main

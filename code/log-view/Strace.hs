@@ -27,10 +27,10 @@ import qualified Data.Attoparsec.ByteString.Char8 as Parser
 import qualified Data.ByteString.Char8 as ByteString
 import Data.Either (fromLeft, fromRight)
 import Data.FileEmbed (embedFile)
-import Data.Foldable (for_, traverse_)
+import Data.Foldable (for_)
 import Data.Functor (($>), (<&>))
 import Data.Int (Int64)
-import Data.List (find, sortBy, transpose)
+import Data.List (find, sortBy)
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Maybe (fromJust, fromMaybe, mapMaybe)
@@ -60,7 +60,6 @@ import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.IO (IOMode(..), withFile)
 import System.IO (hPutStrLn)
 import System.Posix.Types (ProcessID)
-import System.Process (CreateProcess(..), StdStream(..), proc, withCreateProcess)
 import Text.Printf (printf)
 import Text.Read (readMaybe)
 
@@ -529,6 +528,7 @@ fullContext database = do
       contextEnd = Nothing
       contextHidden = Set.empty
       contextSyscalls = Set.empty
+      contextRoots = undefined
   contextRoots <- fmap Set.fromList $ rootProcesses database Context{..} <&&>
     \[ SQLInteger pid ] -> fromIntegral pid
   pure Context{..}
@@ -635,11 +635,12 @@ createSchema database = executeStatements database
 
 {-
     n=100000
-    m=0
-    while [[ $m -lt 3000000 ]]; do
+    rm -vf /tmp/strace-replication.sqlite &&
+    m=0; while [[ $m -lt 10000000 ]]; do
+      printf "$((m + 1)) .. "
       result/bin/load-strace /tmp/strace-replication $n $m 1>/dev/null
       m=$((m + n))
-      echo -e "\033[0;32m$m\033[0m"
+      printf "\033[0;32m$m\033[0m\n"
     done
 -}
 
@@ -699,7 +700,7 @@ parser = do
     [ StraceSyscall <$> do
         let syscallPid = pid
             syscallTime = time
-        syscallName <- decodeUtf8 <$> Parser.takeWhile (Parser.inClass "0-9a-z_")
+        syscallName <- decodeUtf8 <$> Parser.takeWhile (Parser.inClass "0-9a-z_?")
         let consumeNonParens :: Parser ByteString
             consumeNonParens = mconcat <$> sequenceA
               [ Parser.takeWhile (Parser.notInClass "()\"")
