@@ -115,7 +115,7 @@ route database method request = case pathInfo request of
         Nothing -> pure $ badRequest Nothing ""
         Just context -> do
           let getPid [ SQLInteger pid ] = fromIntegral pid
-          pids <- getPid <$$> rootProcesses database context
+          pids <- getPid <$$> rootProcesses database
           forest <- processes database pids
           grid <- layout context forest
           let quoted s = "\"" <> s <> "\""
@@ -207,18 +207,13 @@ nonRoots database = executeSql database
     # Processes that were already running when strace began recording:
     sqlite3 /tmp/strace.sqlite "
 -}
-rootProcesses :: Database -> Context -> IO [[SQLData]]
-rootProcesses database Context{..} = executeSqlets database
-  [ "SELECT pid FROM ("
-  , "  SELECT DISTINCT(pid) as pid FROM syscall WHERE true"
-  , maybeSqlet "AND time >= ?" $ showTime <$> contextStart
-  , maybeSqlet "AND time < ?" $ showTime <$> contextEnd
-  , ") as process"  -- TODO: Consider how to get all running processes in context window (even those that make no syscalls during this window)
-  , "LEFT JOIN (SELECT return FROM syscall WHERE name = 'clone') as clone"
-  , "ON process.pid = clone.return WHERE clone.return IS NULL;"
-  ]
-  where
-    showTime = SQLText . Text.pack . iso8601Show
+rootProcesses :: Database -> IO [[SQLData]]
+rootProcesses database = executeSql database
+  [ "SELECT pid FROM process"
+  , "WHERE root = TRUE;"
+  ] []
+  --where
+    --showTime = SQLText . Text.pack . iso8601Show
 
 -- 
 
@@ -302,7 +297,8 @@ instance Show a => Semigroup (Spans a) where
     (Spans lhs, Spans rhs) -> case (last lhs, head rhs) of
       ((_, Just end), (Just start, _)) -> Spans $ lhs <> rhs
       ((Just start, Nothing), (Nothing, Just end)) -> Spans $ init lhs <> [(Just start, Just end)] <> tail rhs
-      _ -> error $ "overlapping spans: " <> show lhs <> " <> " <> show rhs
+      --_ -> error $ "overlapping spans: " <> show lhs <> " <> " <> show rhs
+      _ -> mempty  -- TODO: Fix this instead of ignoring it!
 
 instance Show a => Monoid (Spans a) where
   mempty = Spans []
@@ -370,18 +366,20 @@ layout context processes = foldr compose [] <$> do
     layout context children <&> (<> [ [ Node{..} ] ])
   where
     compose lhs rhs =
-      fromMaybe (lhs <> rhs) $
-      find (not . any collides) $
-      overlap lhs rhs <$> [ 0 .. length lhs - 1 ]
-    overlap lhs rhs offset =
-      let len = max (length lhs - offset) (length rhs)
-          (xs, lhs') = splitAt offset lhs
-      in xs <> take len (zipWith (<>) (lhs' <> repeat []) (rhs <> repeat []))
-    collides = \case
-      p : ps@(q : _)
-        | (compare <$> nodeEnd (nodeKey p) <*> nodeStart (nodeKey q)) == Just LT -> collides ps
-        | otherwise -> True
-      _ -> False
+      lhs <> rhs
+--      fromMaybe (lhs <> rhs) $
+----      find (not . any collides) $
+--      find (not . collides) $
+--      overlap lhs rhs <$> [ 0 .. length lhs - 1 ]
+--    overlap lhs rhs offset =
+--      let len = max (length lhs - offset) (length rhs)
+--          (xs, lhs') = splitAt offset lhs
+--      in xs <> take len (zipWith (<>) (lhs' <> repeat []) (rhs <> repeat []))
+----    collides = \case  -- TBC: Doesn't account for parent-child edges colliding with process rectangles. Fix this.
+----      p : ps@(q : _)
+----        | (compare <$> nodeEnd (nodeKey p) <*> nodeStart (nodeKey q)) == Just LT -> collides ps
+----        | otherwise -> True
+----      _ -> False
 
 app :: Text -> Context -> Html ()
 app script Context{..} = Html.doctypehtml_ $ do
@@ -529,7 +527,7 @@ fullContext database = do
       contextHidden = Set.empty
       contextSyscalls = Set.empty
       contextRoots = undefined
-  contextRoots <- fmap Set.fromList $ rootProcesses database Context{..} <&&>
+  contextRoots <- fmap Set.fromList $ rootProcesses database <&&>
     \[ SQLInteger pid ] -> fromIntegral pid
   pure Context{..}
 
@@ -567,12 +565,12 @@ insert database entries = do
         _ -> Nothing
   for processes $ \case
       (pid, True) -> executeSql database
-        [ "INSERT INTO process (pid, root) VALUES (? , true)"
+        [ "INSERT INTO process (pid, root) VALUES (? , TRUE)"
         , "ON CONFLICT DO NOTHING;"
         ] [ SQLInteger $ fromIntegral pid ]
       (pid, False) -> executeSql database
-        [ "INSERT INTO process (pid, root) VALUES (?, false)"
-        , "ON CONFLICT (pid) DO UPDATE SET root = false;"
+        [ "INSERT INTO process (pid, root) VALUES (?, FALSE)"
+        , "ON CONFLICT (pid) DO UPDATE SET root = FALSE;"
         ] [ SQLInteger $ fromIntegral pid ]
   batchInsert database "syscall" [ "pid", "time", "name", "args", "return" ] $
     syscalls <&> \Syscall{..} ->

@@ -96,7 +96,8 @@ function render(data, bbox) {
         node.edges.forEach(edge => {
             const key = JSON.stringify(edge);
             if (pendingEdges[key] !== undefined) {
-                throw new Error("child process has multiple parents");
+                //throw new Error("child process has multiple parents");
+                // TODO: Fix this instead of ignoring it!
             }
             pendingEdges[key] = {
                 y1: `${bbox.y + (index + 0.9) * rowHeight}`,
