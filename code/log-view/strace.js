@@ -508,7 +508,7 @@ async function fetchLoop(onLayoutChange) {
     return {
         minTime,
         maxTime,
-        setTimeSelection: (start, end, immediate) => {
+        setTimeSelection: (start, end, immediate) => {  // TODO: Handle situation where selection size approaches zero.
             console.log(`start = ${start}, end = ${end}`);
             setPending({ start, end });
             if (!state.active) {

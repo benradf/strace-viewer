@@ -22,6 +22,7 @@ module Strace
   ) where
 
 import Control.Exception (finally)
+import Control.Monad (guard)
 import Data.Attoparsec.ByteString.Char8 (Parser)
 import qualified Data.Attoparsec.ByteString.Char8 as Parser
 import qualified Data.ByteString.Char8 as ByteString
@@ -30,7 +31,9 @@ import Data.FileEmbed (embedFile)
 import Data.Foldable (for_)
 import Data.Functor (($>), (<&>))
 import Data.Int (Int64)
-import Data.List (find, sortBy)
+import Data.List (sortBy)
+import Data.List.NonEmpty (NonEmpty(..))
+import qualified Data.List.NonEmpty as NonEmpty
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Maybe (fromJust, fromMaybe, mapMaybe)
@@ -117,7 +120,7 @@ route database method request = case pathInfo request of
           let getPid [ SQLInteger pid ] = fromIntegral pid
           pids <- getPid <$$> rootProcesses database
           forest <- processes database pids
-          grid <- layout context forest
+          grid <- NonEmpty.toList <$$> layout context forest
           let quoted s = "\"" <> s <> "\""
               nullableTime = maybe "null" $ quoted . serialiseTime
               jsonArray elements = "[" <> ByteString.intercalate "," elements <> "]"  -- TODO: Move json helpers to Http
@@ -354,7 +357,7 @@ data Node = Node
   , nodeEdges :: [NodeKey]
   }
 
-layout :: Context -> [Process] -> IO [[Node]]
+layout :: Context -> [Process] -> IO [NonEmpty Node]
 layout context processes = foldr compose [] <$> do
   let sorted = sortBy $ comparing processStart
   for (sorted processes) $ \process -> do
@@ -363,23 +366,26 @@ layout context processes = foldr compose [] <$> do
         nodeEdges = toNodeKey <$> children
         nodeKey = toNodeKey process
         nodeCommand = ""
-    layout context children <&> (<> [ [ Node{..} ] ])
+    layout context children <&> (<> [ pure Node{..} ])
   where
-    compose lhs rhs =
-      lhs <> rhs
---      fromMaybe (lhs <> rhs) $
-----      find (not . any collides) $
---      find (not . collides) $
---      overlap lhs rhs <$> [ 0 .. length lhs - 1 ]
---    overlap lhs rhs offset =
---      let len = max (length lhs - offset) (length rhs)
---          (xs, lhs') = splitAt offset lhs
---      in xs <> take len (zipWith (<>) (lhs' <> repeat []) (rhs <> repeat []))
-----    collides = \case  -- TBC: Doesn't account for parent-child edges colliding with process rectangles. Fix this.
-----      p : ps@(q : _)
-----        | (compare <$> nodeEnd (nodeKey p) <*> nodeStart (nodeKey q)) == Just LT -> collides ps
-----        | otherwise -> True
-----      _ -> False
+    compose :: [NonEmpty Node] -> [NonEmpty Node] -> [NonEmpty Node]
+    compose = curry $ \case
+      ([], []) -> []
+      (lhs, []) -> lhs
+      ([], rhs) -> rhs
+      (lhs, rhs) -> fromMaybe (lhs <> rhs) $ do
+        let latest = nodeEnd . nodeKey . NonEmpty.last
+        latestLhs <- maximum <$> traverse latest lhs
+        let earliest = nodeStart . nodeKey . NonEmpty.head
+        earliestRhs <- minimum <$> traverse earliest rhs
+        guard $ latestLhs < earliestRhs
+        let minLength = min (length lhs) (length rhs)
+        pure $ zipWith (<>) lhs rhs <>
+          case (length lhs, length rhs) of
+            (lenLhs, lenRhs)
+              | lenLhs > lenRhs -> drop lenRhs lhs
+              | lenLhs < lenRhs -> drop lenLhs rhs
+              | otherwise -> []
 
 app :: Text -> Context -> Html ()
 app script Context{..} = Html.doctypehtml_ $ do
