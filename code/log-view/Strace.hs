@@ -51,12 +51,15 @@ import Data.Time.Format (defaultTimeLocale, parseTimeM)
 import Data.Time.Format.ISO8601 (iso8601ParseM, iso8601Show)
 import Data.Time.LocalTime (TimeOfDay, timeOfDayToTime, timeToTimeOfDay)
 import Data.Traversable (for)
-import Database.SQLite3 (Database)
-import Database.SQLite3 (SQLData(..))
+import Database.SQLite3 (Database, SQLData(..))
+import qualified Database.SQLite3 as SQLite3
+import GHC.Stack (HasCallStack)
 import Http.Server
+import Log
 import Lucid.Base (Html)
 import qualified Lucid.Base as Html
 import qualified Lucid.Html5 as Html
+import Prelude hiding (log)
 import qualified Sqlite
 import Sqlite hiding (withDatabase)
 import System.Directory (createDirectoryIfMissing, doesFileExist)
@@ -282,6 +285,8 @@ processes database pids = fmap concat $ for pids $ \pid -> do
             , sqlet "AND syscall.pid = ?" $ SQLInteger $ fromIntegral pid
             , maybeSqlet "AND syscall.time >= ?" $ showTime <$> processStart
             , maybeSqlet "AND syscall.time < ?" $ showTime <$> processEnd
+-- TODO: Even if a process falls outside the context window, its children may not so it still must be traversed.
+--       (but not added to the layout)
             , maybeSqlet "AND (exit.time > ? OR exit.time IS NULL)" $ showTime <$> contextStart
             , maybeSqlet "AND (syscall.time < ? OR syscall.time IS NULL)" $ showTime <$> contextEnd
             , flip foldMap contextHidden $ \p ->
@@ -552,32 +557,12 @@ load path n m = withDatabase (path <> ".sqlite") $ \database _ -> do
     Left e -> error e
     Right entries -> insert database entries
 
-insert :: Database -> [StraceEntry] -> IO ()
+insert :: HasCallStack => Database -> [StraceEntry] -> IO ()
 insert database entries = do
   let filterEntries = flip mapMaybe entries
-  let syscalls = filterEntries $ \case
-        StraceSyscall syscall -> Just syscall
-        _ -> Nothing
-      signals = filterEntries $ \case
-        StraceSignal signal -> Just signal
-        _ -> Nothing
-      exits = filterEntries $ \case
-        StraceExit exit -> Just exit
-        _ -> Nothing
-      processes = Map.toList $ Map.fromListWith (&&) $ filterEntries $ \case
-        StraceSyscall Syscall{..}
-          | syscallName == "clone" -> Just (read $ Text.unpack syscallReturn, False)
-          | otherwise -> Just (syscallPid, True)
-        _ -> Nothing
-  for processes $ \case
-      (pid, True) -> executeSql database
-        [ "INSERT INTO process (pid, root) VALUES (? , TRUE)"
-        , "ON CONFLICT DO NOTHING;"
-        ] [ SQLInteger $ fromIntegral pid ]
-      (pid, False) -> executeSql database
-        [ "INSERT INTO process (pid, root) VALUES (?, FALSE)"
-        , "ON CONFLICT (pid) DO UPDATE SET root = FALSE;"
-        ] [ SQLInteger $ fromIntegral pid ]
+      syscalls = filterEntries $ \case { StraceSyscall syscall -> Just syscall; _ -> Nothing }
+      signals = filterEntries $ \case { StraceSignal signal -> Just signal; _ -> Nothing }
+      exits = filterEntries $ \case { StraceExit exit -> Just exit; _ -> Nothing }
   batchInsert database "syscall" [ "pid", "time", "name", "args", "return" ] $
     syscalls <&> \Syscall{..} ->
       [ SQLInteger $ fromIntegral syscallPid
@@ -599,6 +584,59 @@ insert database entries = do
       , maybe SQLNull SQLInteger exitCode
       , maybe SQLNull SQLText exitSignal
       ]
+  sequence_ $ filterEntries $ \case
+    StraceSyscall Syscall{..}
+      | syscallName == "clone" -> Just $ do
+          --executeSql
+          SQLite3.changes database >>= \case
+            0 -> log ansiYellow ""
+          {-
+            INSERT INTO process (pid, ppid, start, end) VALUES (?, ?, ?, "")
+            ON CONFLICT (pid, end) UPDATE SET end = null;
+
+            CREATE TRIGGER IF NOT EXISTS process_start
+            AFTER INSERT ON syscall WHEN NEW.name = "clone" BEGIN
+              INSERT INTO process (pid, ppid, start, end)
+              VALUES (NEW.return, NEW.pid, NEW.time, "")
+              ON CONFLICT (pid, end) UPDATE SET end = null;
+              INSERT INTO process (pid, ppid, start, end)
+              VALUES (NEW.return, NEW.pid, NEW.time, "")
+              ON CONFLICT DO NOTHING;
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS process_end
+            AFTER INSERT ON exit BEGIN
+              UPDATE process SET end = NEW.time
+              WHERE pid = NEW.pid AND end = "";
+              INSERT INTO process (pid, end)
+              VALUES (NEW.pid, NEW.time);
+            END;
+
+            changes :: Database -> IO Int  -- Expect this to be one
+          -}
+      | otherwise -> Nothing
+    StraceExit Exit{..} ->  undefined
+          {-
+            UPDATE process SET end = ? WHERE pid = ? AND end = "";
+            changes :: Database -> IO Int  -- Expect this to be one
+          -}
+    _ -> Nothing
+
+--  let processes = Map.toList $ Map.fromListWith (&&) $ filterEntries $ \case
+--        StraceSyscall Syscall{..}
+--          | syscallName == "clone" -> Just (read $ Text.unpack syscallReturn, False)
+--          | otherwise -> Just (syscallPid, True)
+--        _ -> Nothing
+--  for processes $ \case
+--      (pid, True) -> executeSql database
+--        [ "INSERT INTO process (pid, root) VALUES (? , TRUE)"
+--        , "ON CONFLICT DO NOTHING;"
+--        ] [ SQLInteger $ fromIntegral pid ]
+--      (pid, False) -> executeSql database
+--        [ "INSERT INTO process (pid, root) VALUES (?, FALSE)"
+--        , "ON CONFLICT (pid) DO UPDATE SET root = FALSE;"
+--        ] [ SQLInteger $ fromIntegral pid ]
+--  pure ()
 
 withDatabase :: FilePath -> (Database -> IO () -> IO ()) -> IO ()
 withDatabase path application = Sqlite.withDatabase path $
@@ -631,9 +669,30 @@ createSchema database = executeStatements database
     ]
   , [ "CREATE TABLE IF NOT EXISTS process ("
     , "  pid INTEGER,"
-    , "  root INTEGER,"
-    , "  PRIMARY KEY(pid)"
+    , "  ppid INTEGER,"
+    , "  start TEXT,"
+    , "  end TEXT,"
+    , "  UNIQUE (pid, end)"
     , ");"
+    ]
+  , [ "CREATE TRIGGER IF NOT EXISTS process_start"
+    , "AFTER INSERT ON syscall WHEN NEW.name = \"clone\" BEGIN"
+    , "  INSERT INTO process (pid, ppid, start, end)"
+    , "  VALUES (NEW.return, NEW.pid, NEW.time, \"\")"
+    , "  ON CONFLICT (pid, end) DO UPDATE SET end = null;"
+    , "  INSERT INTO process (pid, ppid, start, end)"
+    , "  VALUES (NEW.return, NEW.pid, NEW.time, \"\")"
+    , "  ON CONFLICT DO NOTHING;"
+    , "END;"
+    ]
+  , [ "CREATE TRIGGER IF NOT EXISTS process_end"
+    , "AFTER INSERT ON exit BEGIN"
+    , "  UPDATE process SET end = NEW.time"
+    , "  WHERE pid = NEW.pid AND end = \"\";"
+    , "  INSERT INTO process (pid, end)"
+    , "  VALUES (NEW.pid, NEW.time)"
+    , "  ON CONFLICT DO NOTHING;"
+    , "END;"
     ]
   , [ "CREATE INDEX IF NOT EXISTS syscall_pid_time ON syscall (pid, time);" ]
   , [ "CREATE INDEX IF NOT EXISTS syscall_name ON syscall (name);" ]

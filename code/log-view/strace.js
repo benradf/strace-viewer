@@ -174,6 +174,8 @@ function animate2(target, at) {
     });
 }
 
+// TODO: When selection is double the width of earliest and latest labels, display start and end labels with microseconds.
+
 function rangeSelectionControl(svg, { minLabel, maxLabel, getLabelForPercentage, onChange }) {
     //const debugOpacity = 0.2;
     const debugOpacity = 0.0;
