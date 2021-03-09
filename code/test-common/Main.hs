@@ -50,3 +50,4 @@ main = Tasty.defaultMain $
             HUnit.assertEqual "" batchInsertRows results
             executeSql database [ "DELETE FROM test;" ] []
     ]
+    -- TODO: Add test for handleConflict under heavy load from multiple writers

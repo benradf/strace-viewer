@@ -14,9 +14,11 @@ module Sqlite
   , sqlet
   , maybeSqlet
   , executeSqlets
+  , Conflict(..)
+  , handleConflict
   ) where
 
-import Control.Exception (bracket)
+import Control.Exception (Exception, bracket, catchJust, throw)
 import Control.Monad (when)
 import Control.Monad.Trans.Writer (Writer(..), runWriter, tell)
 import Data.Bifunctor (first)
@@ -28,7 +30,8 @@ import Data.Monoid (Ap(..))
 import Data.String (IsString(..))
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Database.SQLite3 (Database, SQLData(..), Statement, StepResult(..))
+import Data.Time.Clock (addUTCTime, getCurrentTime)
+import Database.SQLite3 (Database, Error(..), SQLData(..), SQLError(..), Statement, StepResult(..))
 import qualified Database.SQLite3 as SQLite3
 import GHC.Stack (HasCallStack)
 import Log
@@ -131,3 +134,25 @@ executeSqlets :: Database -> [Sqlet] -> IO [[SQLData]]
 executeSqlets database sqlets =
   let (sql, args) = runWriter $ coerce $ mconcat sqlets
   in executeSql database [ sql ] args
+
+data Conflict = Conflict [SQLError]
+  deriving Show
+
+instance Exception Conflict
+
+handleConflict :: IO a -> IO a
+handleConflict action =
+  attempt [] =<< addUTCTime 1 <$> getCurrentTime
+  where
+    attempt errors deadline = do
+      action `catch` retry errors deadline
+    catch = catchJust $ \case
+      e@(SQLError ErrorConstraint _ _) -> Just e
+      e@(SQLError ErrorLocked _ _) -> Just e
+      e@(SQLError ErrorBusy _ _) -> Just e
+      _ -> Nothing
+    retry errors deadline e = do
+      now <- getCurrentTime
+      if now >= deadline || sqlError e == ErrorConstraint
+        then throw $ Conflict (e : errors)
+        else attempt (e : errors) deadline
