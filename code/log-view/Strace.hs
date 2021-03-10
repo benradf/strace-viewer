@@ -22,6 +22,7 @@ module Strace
   ) where
 
 import Control.Exception (finally)
+import Control.Concurrent.MVar (newEmptyMVar, newMVar, putMVar, readMVar)
 import Control.Monad (guard)
 import Data.Attoparsec.ByteString.Char8 (Parser)
 import qualified Data.Attoparsec.ByteString.Char8 as Parser
@@ -36,7 +37,7 @@ import Data.List.NonEmpty (NonEmpty(..))
 import qualified Data.List.NonEmpty as NonEmpty
 import Data.Map (Map)
 import qualified Data.Map as Map
-import Data.Maybe (fromJust, fromMaybe, mapMaybe)
+import Data.Maybe (catMaybes, fromJust, fromMaybe, mapMaybe)
 import Data.Ord (comparing)
 import Data.Ratio((%), Ratio)
 import Data.Set (Set)
@@ -54,14 +55,17 @@ import Data.Traversable (for)
 import Database.SQLite3 (Database, SQLData(..))
 import GHC.Stack (HasCallStack)
 import Http.Server
+import Log
 import Lucid.Base (Html)
 import qualified Lucid.Base as Html
 import qualified Lucid.Html5 as Html
+import Prelude hiding (log)
 import qualified Sqlite
 import Sqlite hiding (withDatabase)
 import System.Directory (createDirectoryIfMissing, doesFileExist)
+import System.Directory (removeFile)
 import qualified System.INotify as INotify
-import System.IO (IOMode(..), withFile)
+import System.IO (IOMode(..), hClose, openFile, withFile)
 import System.IO (hPutStrLn)
 import System.Posix.ByteString.FilePath (RawFilePath)
 import System.Posix.Types (ProcessID)
@@ -550,24 +554,48 @@ fullContext database = do
     "
 -}
 
-importer :: RawFilePath -> IO ()
-importer path = void $ do
+importer :: HasCallStack => RawFilePath -> Database -> IO ()
+importer root database = void $ do
   inotify <- INotify.initINotify
-  INotify.addWatch inotify [ INotify.Create ] path $ \case
+  INotify.addWatch inotify [ INotify.Create ] root $ \case
     INotify.Created{..}
       | isDirectory -> pure ()
-      | otherwise -> withFile (ByteString.unpack filePath) ReadMode $ \file -> do
-          undefined
-    -- TBC: 
-    -- 1. Add a Modified watch per Created file
-    -- 2. Read non-blocking and feed to parser
-    -- 3. Add a Closed (writable) watch per Created file and close it ourselves when strace does
+      | otherwise -> do
+          let path = ByteString.unpack $ root <> "/" <> filePath
+          log ansiGreen $ "opening " <> path
+          file <- openFile path ReadMode
+          --parse <- newMVar $ Parser.parse parser
+          -- TBC: Need to stop using ByteString.lines and make parser handle newlines itself
+          -- Because strace does not write lines atomically. Feed chunks to parser as they become available.
+          let batch = do
+                log ansiBoldWhite "batch"
+                lines <- ByteString.lines <$> getAvailable file
+                let pairs = lines <&> \line -> (line, Parser.parseOnly parser line)
+                log ansiWhite $ "read " <> show (length pairs) <> " lines from " <> path
+                let warning = \case
+                      (_, Right entry) -> pure $ Just entry
+                      (line, Left e) -> log ansiYellow (e <> "\n" <> ByteString.unpack line) $> Nothing
+                insert database =<< (catMaybes <$> traverse warning pairs)
+          watch <- newEmptyMVar
+          let handler = \case
+                INotify.Modified{..} -> batch
+                INotify.Closed{..} -> do
+                  log ansiRed $ "closing " <> path
+                  INotify.removeWatch =<< readMVar watch
+                  hClose file
+          let varieties = [ INotify.Modify, INotify.CloseWrite ]
+          putMVar watch =<< INotify.addWatch inotify varieties (ByteString.pack path) handler
+          batch
+          --removeFile path
+  where
+    getAvailable file =
+      ByteString.hGetNonBlocking file 0x10000 >>=
+        \chunk -> if chunk /= ByteString.empty
+          then (chunk <>) <$> getAvailable file
+          else pure chunk
 
-  --where
-    --readChunk parse = ByteString.hGetNonBlocking file 65536 >>= undefined
---      ByteString.empty -> pure ()
---      chunk -> parse
-      
+importerTest :: IO ()
+importerTest = withDatabase "/tmp/strace.sqlite" $ \db _ -> importer "/tmp/strace" db
 
 --    lines <- take n . drop m . ByteString.lines <$> ByteString.readFile path
 --    putStrLn $ show (length lines) <> " lines read"
@@ -576,7 +604,31 @@ importer path = void $ do
 --        -- `finally` ByteString.putStrLn line
 --    pure $ sequenceA results
           
+  --loadLogs path n m >>= \case
+  --  Left e -> error e
+  --  Right entries -> insert database entries
   
+
+
+    -- TBC: 
+    -- 1. Add a Modified watch per Created file
+    -- 2. Read non-blocking and feed to parser
+    -- 3. Add a Closed (writable) watch per Created file and close it ourselves when strace does
+
+  {-
+      1. finish inotify import
+      2. fix process tree walker
+      3. add test for strace api
+      4. show process name on hover
+      5. fix colour distribution
+      6. implement animation
+  -}
+
+  --where
+    --readChunk parse = ByteString.hGetNonBlocking file 65536 >>= undefined
+--      ByteString.empty -> pure ()
+--      chunk -> parse
+      
 
 load :: FilePath -> Int -> Int -> IO ()
 load path n m = withDatabase (path <> ".sqlite") $ \database _ -> do
@@ -584,7 +636,7 @@ load path n m = withDatabase (path <> ".sqlite") $ \database _ -> do
     Left e -> error e
     Right entries -> insert database entries
 
-insert :: HasCallStack => Database -> [StraceEntry] -> IO ()
+insert :: Database -> [StraceEntry] -> IO ()
 insert database entries = do
   let filterEntries = flip mapMaybe entries
       syscalls = filterEntries $ \case { StraceSyscall syscall -> Just syscall; _ -> Nothing }
@@ -701,32 +753,6 @@ createSchema database = executeStatements database
     done
 -}
 
-{-
-    100000
-    200000
-    300000
-    400000
-    500000
-    600000
-    700000
-    800000
-    900000
-    1000000
-    1100000
-    load-strace: Failed reading: empty
-    CallStack (from HasCallStack):
-      error, called at log-view/Strace.hs:610:15 in main:Strace
-    1200000
-    load-strace: Failed reading: empty
-    CallStack (from HasCallStack):
-      error, called at log-view/Strace.hs:610:15 in main:Strace
-    1300000
-    1400000
-    1500000
-    1600000
-    1700000
-    1800000
--}
 
 loadLogs :: FilePath -> Int -> Int -> IO (Either String [StraceEntry])
 loadLogs path n m = do
@@ -743,6 +769,15 @@ data StraceEntry
   | StraceSignal Signal
   | StraceExit Exit
   deriving (Eq, Show)
+
+{-
+  Need to handle:
+
+22:31:54.445652 restart_syscall(<... resuming interrupted read ...> <detached ...>
+
+which happens when newly attaching to a process.
+
+-}
 
 parser :: Parser StraceEntry
 parser = do

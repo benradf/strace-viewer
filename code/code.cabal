@@ -146,6 +146,7 @@ executable load-strace
     direct-sqlite,
     directory,
     file-embed,
+    hinotify,
     http-types,
     process,
     random,
