@@ -29,7 +29,7 @@ import qualified Data.ByteString.Char8 as ByteString
 import Data.Either (fromLeft, fromRight)
 import Data.FileEmbed (embedFile)
 import Data.Foldable (for_)
-import Data.Functor (($>), (<&>))
+import Data.Functor (($>), (<&>), void)
 import Data.Int (Int64)
 import Data.List (sortBy)
 import Data.List.NonEmpty (NonEmpty(..))
@@ -52,19 +52,18 @@ import Data.Time.Format.ISO8601 (iso8601ParseM, iso8601Show)
 import Data.Time.LocalTime (TimeOfDay, timeOfDayToTime, timeToTimeOfDay)
 import Data.Traversable (for)
 import Database.SQLite3 (Database, SQLData(..))
-import qualified Database.SQLite3 as SQLite3
 import GHC.Stack (HasCallStack)
 import Http.Server
-import Log
 import Lucid.Base (Html)
 import qualified Lucid.Base as Html
 import qualified Lucid.Html5 as Html
-import Prelude hiding (log)
 import qualified Sqlite
 import Sqlite hiding (withDatabase)
 import System.Directory (createDirectoryIfMissing, doesFileExist)
+import qualified System.INotify as INotify
 import System.IO (IOMode(..), withFile)
 import System.IO (hPutStrLn)
+import System.Posix.ByteString.FilePath (RawFilePath)
 import System.Posix.Types (ProcessID)
 import Text.Printf (printf)
 import Text.Read (readMaybe)
@@ -551,6 +550,34 @@ fullContext database = do
     "
 -}
 
+importer :: RawFilePath -> IO ()
+importer path = void $ do
+  inotify <- INotify.initINotify
+  INotify.addWatch inotify [ INotify.Create ] path $ \case
+    INotify.Created{..}
+      | isDirectory -> pure ()
+      | otherwise -> withFile (ByteString.unpack filePath) ReadMode $ \file -> do
+          undefined
+    -- TBC: 
+    -- 1. Add a Modified watch per Created file
+    -- 2. Read non-blocking and feed to parser
+    -- 3. Add a Closed (writable) watch per Created file and close it ourselves when strace does
+
+  --where
+    --readChunk parse = ByteString.hGetNonBlocking file 65536 >>= undefined
+--      ByteString.empty -> pure ()
+--      chunk -> parse
+      
+
+--    lines <- take n . drop m . ByteString.lines <$> ByteString.readFile path
+--    putStrLn $ show (length lines) <> " lines read"
+--    results <- for lines $ \line ->
+--      pure (Parser.parseOnly parser line)
+--        -- `finally` ByteString.putStrLn line
+--    pure $ sequenceA results
+          
+  
+
 load :: FilePath -> Int -> Int -> IO ()
 load path n m = withDatabase (path <> ".sqlite") $ \database _ -> do
   loadLogs path n m >>= \case
@@ -584,59 +611,6 @@ insert database entries = do
       , maybe SQLNull SQLInteger exitCode
       , maybe SQLNull SQLText exitSignal
       ]
-  sequence_ $ filterEntries $ \case
-    StraceSyscall Syscall{..}
-      | syscallName == "clone" -> Just $ do
-          --executeSql
-          SQLite3.changes database >>= \case
-            0 -> log ansiYellow ""
-          {-
-            INSERT INTO process (pid, ppid, start, end) VALUES (?, ?, ?, "")
-            ON CONFLICT (pid, end) UPDATE SET end = null;
-
-            CREATE TRIGGER IF NOT EXISTS process_start
-            AFTER INSERT ON syscall WHEN NEW.name = "clone" BEGIN
-              INSERT INTO process (pid, ppid, start, end)
-              VALUES (NEW.return, NEW.pid, NEW.time, "")
-              ON CONFLICT (pid, end) UPDATE SET end = null;
-              INSERT INTO process (pid, ppid, start, end)
-              VALUES (NEW.return, NEW.pid, NEW.time, "")
-              ON CONFLICT DO NOTHING;
-            END;
-
-            CREATE TRIGGER IF NOT EXISTS process_end
-            AFTER INSERT ON exit BEGIN
-              UPDATE process SET end = NEW.time
-              WHERE pid = NEW.pid AND end = "";
-              INSERT INTO process (pid, end)
-              VALUES (NEW.pid, NEW.time);
-            END;
-
-            changes :: Database -> IO Int  -- Expect this to be one
-          -}
-      | otherwise -> Nothing
-    StraceExit Exit{..} ->  undefined
-          {-
-            UPDATE process SET end = ? WHERE pid = ? AND end = "";
-            changes :: Database -> IO Int  -- Expect this to be one
-          -}
-    _ -> Nothing
-
---  let processes = Map.toList $ Map.fromListWith (&&) $ filterEntries $ \case
---        StraceSyscall Syscall{..}
---          | syscallName == "clone" -> Just (read $ Text.unpack syscallReturn, False)
---          | otherwise -> Just (syscallPid, True)
---        _ -> Nothing
---  for processes $ \case
---      (pid, True) -> executeSql database
---        [ "INSERT INTO process (pid, root) VALUES (? , TRUE)"
---        , "ON CONFLICT DO NOTHING;"
---        ] [ SQLInteger $ fromIntegral pid ]
---      (pid, False) -> executeSql database
---        [ "INSERT INTO process (pid, root) VALUES (?, FALSE)"
---        , "ON CONFLICT (pid) DO UPDATE SET root = FALSE;"
---        ] [ SQLInteger $ fromIntegral pid ]
---  pure ()
 
 withDatabase :: FilePath -> (Database -> IO () -> IO ()) -> IO ()
 withDatabase path application = Sqlite.withDatabase path $
@@ -756,12 +730,13 @@ createSchema database = executeStatements database
 
 loadLogs :: FilePath -> Int -> Int -> IO (Either String [StraceEntry])
 loadLogs path n m = do
-    lines <- take n . drop m . ByteString.lines <$> ByteString.readFile path
-    putStrLn $ show (length lines) <> " lines read"
-    results <- for lines $ \line ->
-      pure (Parser.parseOnly parser line)
-        -- `finally` ByteString.putStrLn line
-    pure $ sequenceA results
+  undefined
+--    lines <- take n . drop m . ByteString.lines <$> ByteString.readFile path
+--    putStrLn $ show (length lines) <> " lines read"
+--    results <- for lines $ \line ->
+--      pure (Parser.parseOnly parser line)
+--        -- `finally` ByteString.putStrLn line
+--    pure $ sequenceA results
 
 data StraceEntry
   = StraceSyscall Syscall
