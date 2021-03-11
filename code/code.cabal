@@ -133,7 +133,7 @@ executable test-log-view
   other-modules:
     Strace
 
-executable load-strace
+executable strace-import
   default-language: Haskell2010
   main-is: Main.hs
   build-depends:
@@ -162,7 +162,7 @@ executable load-strace
     -fwarn-unused-imports
     -threaded
   hs-source-dirs:
-    load-strace
+    strace-import
     log-view
   other-modules:
     Strace

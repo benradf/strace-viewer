@@ -15,6 +15,7 @@ module Strace
   , Exit(..)
   , route
   , load
+  , importer
   , insert
   , parser
   , withDatabase
@@ -27,6 +28,7 @@ import Control.Monad (guard)
 import Data.Attoparsec.ByteString.Char8 (Parser)
 import qualified Data.Attoparsec.ByteString.Char8 as Parser
 import qualified Data.ByteString.Char8 as ByteString
+import qualified Data.ByteString.Lazy.Char8 as LazyByteString
 import Data.Either (fromLeft, fromRight)
 import Data.FileEmbed (embedFile)
 import Data.Foldable (for_)
@@ -564,21 +566,31 @@ importer root database = void $ do
           let path = ByteString.unpack $ root <> "/" <> filePath
           log ansiGreen $ "opening " <> path
           file <- openFile path ReadMode
-          --parse <- newMVar $ Parser.parse parser
+          --parse <- newMVar $ Parser.parse $ Parser.many' $ parser <* Parser.endOfLine
           -- TBC: Need to stop using ByteString.lines and make parser handle newlines itself
           -- Because strace does not write lines atomically. Feed chunks to parser as they become available.
+                --insert database =<< (catMaybes <$> traverse warning pairs)
+                -- This is no good because the parser wants to consume the entire input before returning anything.
+                -- Need to either
+                --  1. Use attoparsec lazy bytestring module (seems to support far fewer combinators)
+                --  2. Implement a filter layer that caches partial lines waiting for a newline **
+                --  3. Read the file lazily and map ByteString.lines over it, but use ByteString.toStrict on the lines
+          --watch <- newEmptyMVar  -- ** this is probably the easiest solution ...
           let batch = do
                 log ansiBoldWhite "batch"
-                lines <- ByteString.lines <$> getAvailable file
-                let pairs = lines <&> \line -> (line, Parser.parseOnly parser line)
+                lines <- LazyByteString.lines <$> getAvailable file  -- This still isn't right - implement 2 instead.
+                let parse = Parser.parseOnly parser . LazyByteString.toStrict
+                    pairs = lines <&> \line -> (line, parse line)
                 log ansiWhite $ "read " <> show (length pairs) <> " lines from " <> path
                 let warning = \case
                       (_, Right entry) -> pure $ Just entry
-                      (line, Left e) -> log ansiYellow (e <> "\n" <> ByteString.unpack line) $> Nothing
+                      (line, Left e) ->
+                        let message = e <> "\n" <> LazyByteString.unpack line
+                        in log ansiYellow message $> Nothing
                 insert database =<< (catMaybes <$> traverse warning pairs)
           watch <- newEmptyMVar
           let handler = \case
-                INotify.Modified{..} -> batch
+                INotify.Modified{..} -> batch  -- TODO: Consider using threadWaitRead
                 INotify.Closed{..} -> do
                   log ansiRed $ "closing " <> path
                   INotify.removeWatch =<< readMVar watch
@@ -589,8 +601,8 @@ importer root database = void $ do
           --removeFile path
   where
     getAvailable file =
-      ByteString.hGetNonBlocking file 0x10000 >>=
-        \chunk -> if chunk /= ByteString.empty
+      LazyByteString.hGetNonBlocking file 0x10000 >>=
+        \chunk -> if chunk /= LazyByteString.empty
           then (chunk <>) <$> getAvailable file
           else pure chunk
 
