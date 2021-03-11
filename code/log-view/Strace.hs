@@ -14,7 +14,7 @@ module Strace
   , Signal(..)
   , Exit(..)
   , route
-  , load
+  , importLines
   , importer
   , insert
   , parser
@@ -23,18 +23,18 @@ module Strace
   ) where
 
 import Control.Exception (finally)
-import Control.Concurrent.MVar (newEmptyMVar, newMVar, putMVar, readMVar)
+import Control.Concurrent.MVar (modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar)
 import Control.Monad (guard)
 import Data.Attoparsec.ByteString.Char8 (Parser)
 import qualified Data.Attoparsec.ByteString.Char8 as Parser
 import qualified Data.ByteString.Char8 as ByteString
-import qualified Data.ByteString.Lazy.Char8 as LazyByteString
 import Data.Either (fromLeft, fromRight)
 import Data.FileEmbed (embedFile)
 import Data.Foldable (for_)
 import Data.Functor (($>), (<&>), void)
+import Data.IORef (atomicModifyIORef, modifyIORef, newIORef, writeIORef)
 import Data.Int (Int64)
-import Data.List (sortBy)
+import Data.List (sortBy, stripPrefix)
 import Data.List.NonEmpty (NonEmpty(..))
 import qualified Data.List.NonEmpty as NonEmpty
 import Data.Map (Map)
@@ -67,8 +67,7 @@ import Sqlite hiding (withDatabase)
 import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.Directory (removeFile)
 import qualified System.INotify as INotify
-import System.IO (IOMode(..), hClose, openFile, withFile)
-import System.IO (hPutStrLn)
+import System.IO (BufferMode(..), IOMode(..), hClose, hPutStrLn, hSetBuffering, openFile, withFile)
 import System.Posix.ByteString.FilePath (RawFilePath)
 import System.Posix.Types (ProcessID)
 import Text.Printf (printf)
@@ -556,58 +555,66 @@ fullContext database = do
     "
 -}
 
-importer :: HasCallStack => RawFilePath -> Database -> IO ()
-importer root database = void $ do
+importLines :: Database -> ByteString -> [ByteString] -> IO ()
+importLines database pid lines = do
+  let pairs = lines <&> \line -> (line, Parser.parseOnly parser $ pid <> " " <> line)
+  log ansiWhite $ "importing " <> show (length pairs) <> " lines"
+  let warning = \case
+        (_, Right entry) -> pure $ Just entry
+        (line, Left e) ->
+          let message = e <> "\n" <> ByteString.unpack line
+          in log ansiYellow message $> Nothing
+  insert database =<< (catMaybes <$> traverse warning pairs)
+
+importer :: HasCallStack => RawFilePath -> RawFilePath -> Database -> IO ()
+importer root prefix database = void $ do
   inotify <- INotify.initINotify
+  log ansiWhite "DEBUG: addWatch"
   INotify.addWatch inotify [ INotify.Create ] root $ \case
     INotify.Created{..}
       | isDirectory -> pure ()
-      | otherwise -> do
-          let path = ByteString.unpack $ root <> "/" <> filePath
-          log ansiGreen $ "opening " <> path
-          file <- openFile path ReadMode
-          --parse <- newMVar $ Parser.parse $ Parser.many' $ parser <* Parser.endOfLine
-          -- TBC: Need to stop using ByteString.lines and make parser handle newlines itself
-          -- Because strace does not write lines atomically. Feed chunks to parser as they become available.
-                --insert database =<< (catMaybes <$> traverse warning pairs)
-                -- This is no good because the parser wants to consume the entire input before returning anything.
-                -- Need to either
-                --  1. Use attoparsec lazy bytestring module (seems to support far fewer combinators)
-                --  2. Implement a filter layer that caches partial lines waiting for a newline **
-                --  3. Read the file lazily and map ByteString.lines over it, but use ByteString.toStrict on the lines
-          --watch <- newEmptyMVar  -- ** this is probably the easiest solution ...
-          let batch = do
-                log ansiBoldWhite "batch"
-                lines <- LazyByteString.lines <$> getAvailable file  -- This still isn't right - implement 2 instead.
-                let parse = Parser.parseOnly parser . LazyByteString.toStrict
-                    pairs = lines <&> \line -> (line, parse line)
-                log ansiWhite $ "read " <> show (length pairs) <> " lines from " <> path
-                let warning = \case
-                      (_, Right entry) -> pure $ Just entry
-                      (line, Left e) ->
-                        let message = e <> "\n" <> LazyByteString.unpack line
-                        in log ansiYellow message $> Nothing
-                insert database =<< (catMaybes <$> traverse warning pairs)
-          watch <- newEmptyMVar
-          let handler = \case
-                INotify.Modified{..} -> batch  -- TODO: Consider using threadWaitRead
-                INotify.Closed{..} -> do
-                  log ansiRed $ "closing " <> path
-                  INotify.removeWatch =<< readMVar watch
-                  hClose file
-          let varieties = [ INotify.Modify, INotify.CloseWrite ]
-          putMVar watch =<< INotify.addWatch inotify varieties (ByteString.pack path) handler
-          batch
+      | otherwise -> case ByteString.stripPrefix prefix filePath of
+          Nothing -> pure ()
+          Just pid -> do
+            let path = ByteString.unpack $ root <> "/" <> filePath
+            log ansiGreen $ "opening " <> path
+            file <- openFile path ReadMode
+            buffer <- newIORef ""
+            let batch = do
+                  lines <- getLines buffer =<< getAvailable file
+                  importLines database pid lines
+            watch <- newEmptyMVar
+            let handler = \case
+                  INotify.Modified{..} -> do
+                    log ansiWhite $ "reading " <> path
+                    batch
+                  INotify.Closed{..} -> do
+                    log ansiRed $ "closing " <> path
+                    INotify.removeWatch =<< readMVar watch
+                    hClose file
+            putMVar watch =<< INotify.addWatch inotify
+              [ INotify.Modify
+              , INotify.CloseWrite
+              ]  (ByteString.pack path) handler        -- TBC: Do not store sqlite database inside import directory.
+            batch                                      -- Then reimplement process tree walking using new process table.
           --removeFile path
   where
+    getLines buffer string =
+      let (lhs, rhs) = ByteString.break (== '\n') string
+      in if rhs == ByteString.empty
+          then modifyIORef buffer (<> lhs) $> []
+          else do
+              line <- atomicModifyIORef buffer $ \partial -> ("", partial <> lhs)
+              (line :) <$> getLines buffer (ByteString.tail rhs)
     getAvailable file =
-      LazyByteString.hGetNonBlocking file 0x10000 >>=
-        \chunk -> if chunk /= LazyByteString.empty
+      ByteString.hGetNonBlocking file 0x10000 >>=
+        \chunk -> if chunk /= ByteString.empty
           then (chunk <>) <$> getAvailable file
-          else pure chunk
+          else pure ByteString.empty
 
 importerTest :: IO ()
-importerTest = withDatabase "/tmp/strace.sqlite" $ \db _ -> importer "/tmp/strace" db
+importerTest = withDatabase "/tmp/strace.sqlite" $
+  \db _ -> importer "/tmp/strace" "output" db
 
 --    lines <- take n . drop m . ByteString.lines <$> ByteString.readFile path
 --    putStrLn $ show (length lines) <> " lines read"
@@ -641,12 +648,6 @@ importerTest = withDatabase "/tmp/strace.sqlite" $ \db _ -> importer "/tmp/strac
 --      ByteString.empty -> pure ()
 --      chunk -> parse
       
-
-load :: FilePath -> Int -> Int -> IO ()
-load path n m = withDatabase (path <> ".sqlite") $ \database _ -> do
-  loadLogs path n m >>= \case
-    Left e -> error e
-    Right entries -> insert database entries
 
 insert :: Database -> [StraceEntry] -> IO ()
 insert database entries = do
