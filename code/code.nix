@@ -1,8 +1,8 @@
 { mkDerivation, attoparsec, base, binary, bytestring, containers
-, direct-sqlite, directory, file-embed, hinotify, http-client
-, http-types, lib, lucid, lucid-svg, mtl, process, QuickCheck
-, random, tasty, tasty-hunit, tasty-quickcheck, temporary, text
-, time, transformers, unix, wai, warp
+, direct-sqlite, directory, errors, file-embed, hinotify
+, http-client, http-types, lib, lucid, lucid-svg, mtl, process
+, QuickCheck, random, tasty, tasty-hunit, tasty-quickcheck
+, temporary, text, time, transformers, unix, wai, warp
 }:
 mkDerivation {
   pname = "code";
@@ -11,7 +11,7 @@ mkDerivation {
   isLibrary = true;
   isExecutable = true;
   libraryHaskellDepends = [
-    base binary bytestring containers direct-sqlite directory
+    base binary bytestring containers direct-sqlite directory errors
     http-client http-types process text time transformers unix wai warp
   ];
   executableHaskellDepends = [

@@ -55,6 +55,7 @@ import Data.Time.Format.ISO8601 (iso8601ParseM, iso8601Show)
 import Data.Time.LocalTime (TimeOfDay, timeOfDayToTime, timeToTimeOfDay)
 import Data.Traversable (for)
 import Database.SQLite3 (Database, SQLData(..))
+import qualified Filesystem
 import GHC.Stack (HasCallStack)
 import Http.Server
 import Log
@@ -596,7 +597,6 @@ importer root prefix database = void $ do
               , INotify.CloseWrite
               ]  (ByteString.pack path) handler
             batch
-          --removeFile path
   where
     getLines buffer string =
       let (lhs, rhs) = ByteString.break (== '\n') string
