@@ -4,6 +4,7 @@
 module Sqlite
   ( withDatabase
   , withStatement
+  , Conflict(..)
   , executeSql
   , executeSqlScalar
   , executeStatements
@@ -14,8 +15,6 @@ module Sqlite
   , sqlet
   , maybeSqlet
   , executeSqlets
-  , Conflict(..)
-  , handleConflict
   ) where
 
 import Control.Exception (Exception, bracket, catchJust, throw)
@@ -49,6 +48,28 @@ withStatement :: Database -> Text -> (Statement -> IO a) -> IO a
 withStatement database sql action =
   bracket (SQLite3.prepare database sql) SQLite3.finalize action
 
+data Conflict = Conflict [SQLError]
+  deriving Show
+
+instance Exception Conflict
+
+handleConflict :: IO a -> IO a
+handleConflict action =
+  attempt [] =<< addUTCTime 1 <$> getCurrentTime
+  where
+    attempt errors deadline = do
+      action `catch` retry errors deadline
+    catch = catchJust $ \case
+      e@(SQLError ErrorConstraint _ _) -> Just e
+      e@(SQLError ErrorLocked _ _) -> Just e
+      e@(SQLError ErrorBusy _ _) -> Just e
+      _ -> Nothing
+    retry errors deadline e = do
+      now <- getCurrentTime
+      if now >= deadline || sqlError e == ErrorConstraint
+        then throw $ Conflict (e : errors)
+        else attempt (e : errors) deadline
+
 executeSql :: HasCallStack => Database -> [Text] -> [SQLData] -> IO [[SQLData]]
 executeSql database sql params =
   withStatement database (Text.unlines sql) $ \statement -> do
@@ -58,7 +79,7 @@ executeSql database sql params =
     let fetch = SQLite3.stepNoCB statement >>= \case
           Row -> (:) <$> SQLite3.columns statement <*> fetch
           Done -> pure []
-    results <- fetch
+    results <- handleConflict fetch
     log ansiYellow $ "! " <> show results
     pure results
 
@@ -134,25 +155,3 @@ executeSqlets :: Database -> [Sqlet] -> IO [[SQLData]]
 executeSqlets database sqlets =
   let (sql, args) = runWriter $ coerce $ mconcat sqlets
   in executeSql database [ sql ] args
-
-data Conflict = Conflict [SQLError]
-  deriving Show
-
-instance Exception Conflict
-
-handleConflict :: IO a -> IO a
-handleConflict action =
-  attempt [] =<< addUTCTime 1 <$> getCurrentTime
-  where
-    attempt errors deadline = do
-      action `catch` retry errors deadline
-    catch = catchJust $ \case
-      e@(SQLError ErrorConstraint _ _) -> Just e
-      e@(SQLError ErrorLocked _ _) -> Just e
-      e@(SQLError ErrorBusy _ _) -> Just e
-      _ -> Nothing
-    retry errors deadline e = do
-      now <- getCurrentTime
-      if now >= deadline || sqlError e == ErrorConstraint
-        then throw $ Conflict (e : errors)
-        else attempt (e : errors) deadline
