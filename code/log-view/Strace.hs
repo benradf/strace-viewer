@@ -24,7 +24,7 @@ module Strace
 
 import Control.Exception (finally)
 import Control.Concurrent.MVar (modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar)
-import Control.Monad (guard)
+import Control.Monad (guard, when)
 import Data.Attoparsec.ByteString.Char8 (Parser)
 import qualified Data.Attoparsec.ByteString.Char8 as Parser
 import qualified Data.ByteString.Char8 as ByteString
@@ -558,7 +558,8 @@ fullContext database = do
 importLines :: Database -> ByteString -> [ByteString] -> IO ()
 importLines database pid lines = do
   let pairs = lines <&> \line -> (line, Parser.parseOnly parser $ pid <> " " <> line)
-  log ansiWhite $ "importing " <> show (length pairs) <> " lines"
+  when (length pairs > 0) $ log ansiWhite $ "importing " <> show (length pairs) <>
+    " lines (pid " <> ByteString.unpack pid <> ")"
   let warning = \case
         (_, Right entry) -> pure $ Just entry
         (line, Left e) ->
@@ -569,7 +570,6 @@ importLines database pid lines = do
 importer :: HasCallStack => RawFilePath -> RawFilePath -> Database -> IO ()
 importer root prefix database = void $ do
   inotify <- INotify.initINotify
-  log ansiWhite "DEBUG: addWatch"
   INotify.addWatch inotify [ INotify.Create ] root $ \case
     INotify.Created{..}
       | isDirectory -> pure ()
@@ -586,7 +586,6 @@ importer root prefix database = void $ do
             watch <- newEmptyMVar
             let handler = \case
                   INotify.Modified{..} -> do
-                    log ansiWhite $ "reading " <> path
                     batch
                   INotify.Closed{..} -> do
                     log ansiRed $ "closing " <> path
@@ -595,8 +594,8 @@ importer root prefix database = void $ do
             putMVar watch =<< INotify.addWatch inotify
               [ INotify.Modify
               , INotify.CloseWrite
-              ]  (ByteString.pack path) handler        -- TBC: Do not store sqlite database inside import directory.
-            batch                                      -- Then reimplement process tree walking using new process table.
+              ]  (ByteString.pack path) handler
+            batch
           --removeFile path
   where
     getLines buffer string =
