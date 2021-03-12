@@ -220,8 +220,11 @@ nonRoots database = executeSql database
 -}
 rootProcesses :: Database -> IO [[SQLData]]
 rootProcesses database = executeSql database
-  [ "SELECT pid FROM process"
-  , "WHERE root = TRUE;"
+  [ "SELECT lhs.pid"
+  , "FROM process AS lhs"
+  , "LEFT JOIN process AS rhs"
+  , "ON lhs.ppid = rhs.pid"
+  , "WHERE rhs.pid IS NULL;"
   ] []
   --where
     --showTime = SQLText . Text.pack . iso8601Show
