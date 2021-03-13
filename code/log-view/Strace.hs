@@ -559,7 +559,7 @@ fullContext database = do
     "
 -}
 
-importLines :: Database -> ByteString -> [ByteString] -> IO ()
+importLines :: HasCallStack => Database -> ByteString -> [ByteString] -> IO ()
 importLines database pid lines = do
   let pairs = lines <&> \line -> (line, Parser.parseOnly parser $ pid <> " " <> line)
   when (length pairs > 0) $ log ansiWhite $ "importing " <> show (length pairs) <>

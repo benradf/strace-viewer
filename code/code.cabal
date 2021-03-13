@@ -168,3 +168,37 @@ executable strace-import
     log-view
   other-modules:
     Strace
+
+executable test-strace-import
+  default-language: Haskell2010
+  main-is: Main.hs
+  build-depends:
+    QuickCheck,
+    attoparsec,
+    base,
+    bytestring,
+    code,
+    containers,
+    direct-sqlite,
+    directory,
+    file-embed,
+    hinotify,
+    http-client,
+    http-types,
+    mtl,
+    process,
+    lucid,
+    lucid-svg,
+    time,
+    tasty,
+    tasty-hunit,
+    tasty-quickcheck,
+    temporary,
+    text,
+    transformers,
+    unix,
+    wai
+  ghc-options:
+    -fwarn-unused-imports
+  hs-source-dirs:
+    test-strace-import
