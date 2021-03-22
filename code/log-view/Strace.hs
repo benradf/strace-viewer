@@ -22,8 +22,9 @@ module Strace
   , processes
   ) where
 
-import Control.Exception (finally)
+import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar (modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar)
+import Control.Exception (finally)
 import Control.Monad (guard, when)
 import Data.Attoparsec.ByteString.Char8 (Parser)
 import qualified Data.Attoparsec.ByteString.Char8 as Parser
@@ -560,7 +561,7 @@ fullContext database = do
 -}
 
 importLines :: HasCallStack => Database -> ByteString -> [ByteString] -> IO ()
-importLines database pid lines = do
+importLines database pid lines = void $ forkIO $ do
   let pairs = lines <&> \line -> (line, Parser.parseOnly parser $ pid <> " " <> line)
   when (length pairs > 0) $ log ansiWhite $ "importing " <> show (length pairs) <>
     " lines (pid " <> ByteString.unpack pid <> ")"
@@ -613,6 +614,7 @@ importer root prefix database = void $ do
         \chunk -> if chunk /= ByteString.empty
           then (chunk <>) <$> getAvailable file
           else pure ByteString.empty
+
 
 importerTest :: IO ()
 importerTest = withDatabase "/tmp/strace.sqlite" $
