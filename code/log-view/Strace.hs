@@ -23,8 +23,7 @@ module Strace
   ) where
 
 import Control.Concurrent (forkIO)
-import Control.Concurrent.MVar (modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar)
-import Control.Exception (finally)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, readMVar)
 import Control.Monad (guard, when)
 import Data.Attoparsec.ByteString.Char8 (Parser)
 import qualified Data.Attoparsec.ByteString.Char8 as Parser
@@ -33,9 +32,9 @@ import Data.Either (fromLeft, fromRight)
 import Data.FileEmbed (embedFile)
 import Data.Foldable (for_)
 import Data.Functor (($>), (<&>), void)
-import Data.IORef (atomicModifyIORef, modifyIORef, newIORef, writeIORef)
+import Data.IORef (atomicModifyIORef, modifyIORef, newIORef)
 import Data.Int (Int64)
-import Data.List (sortBy, stripPrefix)
+import Data.List (sortBy)
 import Data.List.NonEmpty (NonEmpty(..))
 import qualified Data.List.NonEmpty as NonEmpty
 import Data.Map (Map)
@@ -56,7 +55,6 @@ import Data.Time.Format.ISO8601 (iso8601ParseM, iso8601Show)
 import Data.Time.LocalTime (TimeOfDay, timeOfDayToTime, timeToTimeOfDay)
 import Data.Traversable (for)
 import Database.SQLite3 (Database, SQLData(..))
-import qualified Filesystem
 import GHC.Stack (HasCallStack)
 import Http.Server
 import Log
@@ -67,9 +65,8 @@ import Prelude hiding (log)
 import qualified Sqlite
 import Sqlite hiding (withDatabase)
 import System.Directory (createDirectoryIfMissing, doesFileExist)
-import System.Directory (removeFile)
 import qualified System.INotify as INotify
-import System.IO (BufferMode(..), IOMode(..), hClose, hPutStrLn, hSetBuffering, openFile, withFile)
+import System.IO (IOMode(..), hClose, hPutStrLn, openFile, withFile)
 import System.Posix.ByteString.FilePath (RawFilePath)
 import System.Posix.Types (ProcessID)
 import Text.Printf (printf)

@@ -8,13 +8,23 @@ import Http.Server
 import Log
 import Prelude hiding (log)
 import qualified Strace
+import System.Environment (getProgName)
 
 main :: HasCallStack => IO ()
 main = do
   setLineBuffering
-  log ansiWhite "log-view service started"
-  Strace.withDatabase "/data/strace.sqlite" server
-  log ansiWhite "log-view service stopped"
+  path <- fromMaybe "var/run/strace" . listToMaybe <$> getArgs
+  Strace.withDatabase (path <> "/strace.sqlite") $
+    \database interrupt -> getProgName >>= \case
+      "log-view" -> do
+        setLineBuffering
+        log ansiWhite "log-view service started"
+        server database interrupt
+        log ansiWhite "log-view service stopped"
+      "strace-import" -> do
+        log ansiWhite $ "strace-import started for " <> path
+        Strace.importer (ByteString.pack path) "output." database
+        threadDelay $ 24 * 60 * 60 * 1000000  -- TODO: Find a better way to block
 
 server :: HasCallStack => Database -> IO () -> IO ()
 server database interrupt = listenWithShutdown 8083 (shutdown interrupt) $

@@ -103,28 +103,28 @@ executable test-log-view
   default-language: Haskell2010
   main-is: Main.hs
   build-depends:
-    QuickCheck,
     attoparsec,
     base,
     bytestring,
     code,
     containers,
-    direct-sqlite,
     directory,
+    direct-sqlite,
     file-embed,
     hinotify,
     http-client,
     http-types,
-    mtl,
-    process,
     lucid,
     lucid-svg,
-    time,
+    mtl,
+    process,
+    QuickCheck,
     tasty,
     tasty-hunit,
     tasty-quickcheck,
     temporary,
     text,
+    time,
     transformers,
     unix,
     wai
@@ -135,71 +135,3 @@ executable test-log-view
     log-view
   other-modules:
     Strace
-
-executable strace-import
-  default-language: Haskell2010
-  main-is: Main.hs
-  build-depends:
-    attoparsec,
-    base,
-    binary,
-    bytestring,
-    code,
-    containers,
-    direct-sqlite,
-    directory,
-    file-embed,
-    hinotify,
-    http-types,
-    process,
-    random,
-    lucid,
-    lucid-svg,
-    text,
-    time,
-    transformers,
-    unix,
-    wai,
-    warp
-  ghc-options:
-    -fwarn-unused-imports
-    -threaded
-  hs-source-dirs:
-    strace-import
-    log-view
-  other-modules:
-    Strace
-
-executable test-strace-import
-  default-language: Haskell2010
-  main-is: Main.hs
-  build-depends:
-    QuickCheck,
-    attoparsec,
-    base,
-    bytestring,
-    code,
-    containers,
-    direct-sqlite,
-    directory,
-    file-embed,
-    hinotify,
-    http-client,
-    http-types,
-    mtl,
-    process,
-    lucid,
-    lucid-svg,
-    time,
-    tasty,
-    tasty-hunit,
-    tasty-quickcheck,
-    temporary,
-    text,
-    transformers,
-    unix,
-    wai
-  ghc-options:
-    -fwarn-unused-imports
-  hs-source-dirs:
-    test-strace-import
