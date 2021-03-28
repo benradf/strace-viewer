@@ -16,7 +16,7 @@ import Control.Error.Util (hush)
 import Control.Exception.Base (catchJust)
 import qualified Data.ByteString.Lazy as Lazy
 import GHC.IO.Exception (IOErrorType(..), IOException(..))
-import System.Directory (createDirectory, doesDirectoryExist, removeDirectory, removeFile, renameFile)
+import System.Directory (createDirectory, removeDirectory, removeFile, renameFile)
 import System.IO (Handle, IOMode(..), openBinaryFile)
 import System.Posix.Files (createSymbolicLink)
 
