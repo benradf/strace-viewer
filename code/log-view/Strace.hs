@@ -716,7 +716,10 @@ createSchema database = executeStatements database
     , ");"
     ]
   , [ "CREATE TRIGGER IF NOT EXISTS process_start"
-    , "AFTER INSERT ON syscall WHEN NEW.name = \"clone\" BEGIN"
+    , "AFTER INSERT ON syscall"
+    , "WHEN NEW.name = \"clone\""
+    , "OR NEW.name = \"vfork\""
+    , "BEGIN"
     , "  INSERT INTO process (pid, ppid, start, end)"
     , "  VALUES (NEW.return, NEW.pid, NEW.time, \"\")"
     , "  ON CONFLICT (pid, end) DO UPDATE SET end = null;"
@@ -726,7 +729,8 @@ createSchema database = executeStatements database
     , "END;"
     ]
   , [ "CREATE TRIGGER IF NOT EXISTS process_end"
-    , "AFTER INSERT ON exit BEGIN"
+    , "AFTER INSERT ON exit"
+    , "BEGIN"
     , "  UPDATE process SET end = NEW.time"
     , "  WHERE pid = NEW.pid AND end = \"\";"
     , "  INSERT INTO process (pid, end)"
