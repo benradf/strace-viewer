@@ -2,6 +2,7 @@
 {-# LANGUAGE ExtendedDefaultRules #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE NumericUnderscores #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -22,8 +23,9 @@ module Strace
   , processes
   ) where
 
-import Control.Concurrent (forkIO)
+import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, readMVar)
+import Control.Concurrent.STM (atomically, modifyTVar, newTVarIO, readTVar, retry)
 import Control.Monad (guard, when)
 import Data.Attoparsec.ByteString.Char8 (Parser)
 import qualified Data.Attoparsec.ByteString.Char8 as Parser
@@ -557,48 +559,53 @@ fullContext database = do
     "
 -}
 
-importLines :: HasCallStack => Database -> ByteString -> [ByteString] -> IO ()
-importLines database pid lines = void $ forkIO $ do
-  let pairs = lines <&> \line -> (line, Parser.parseOnly parser $ pid <> " " <> line)
-  when (length pairs > 0) $ log ansiWhite $ "importing " <> show (length pairs) <>
-    " lines (pid " <> ByteString.unpack pid <> ")"
-  let warning = \case
-        (_, Right entry) -> pure $ Just entry
-        (line, Left e) ->
-          let message = e <> "\n" <> ByteString.unpack line
-          in log ansiYellow message $> Nothing
-  insert database =<< (catMaybes <$> traverse warning pairs)
-
-importer :: HasCallStack => RawFilePath -> RawFilePath -> Database -> IO ()
-importer root prefix database = void $ do
-  inotify <- INotify.initINotify
-  INotify.addWatch inotify [ INotify.Create ] root $ \case
-    INotify.Created{..}
-      | isDirectory -> pure ()
-      | otherwise -> case ByteString.stripPrefix prefix filePath of
-          Nothing -> pure ()
-          Just pid -> do
-            let path = ByteString.unpack $ root <> "/" <> filePath
-            log ansiGreen $ "opening " <> path
-            file <- openFile path ReadMode
-            buffer <- newIORef ""
-            let batch = do
-                  lines <- getLines buffer =<< getAvailable file
-                  importLines database pid lines
-            watch <- newEmptyMVar
-            let handler = \case
-                  INotify.Modified{..} -> do
-                    batch
-                  INotify.Closed{..} -> do
-                    log ansiRed $ "closing " <> path
-                    INotify.removeWatch =<< readMVar watch
-                    hClose file
-            putMVar watch =<< INotify.addWatch inotify
-              [ INotify.Modify
-              , INotify.CloseWrite
-              ]  (ByteString.pack path) handler
-            batch
+importer :: HasCallStack => RawFilePath -> RawFilePath -> IO ()
+importer root prefix = withDatabase (ByteString.unpack root <> "/strace.sqlite") $
+  \database interrupt -> void $ do
+    semaphore <- newTVarIO 1
+    onTerminate $ do
+      log ansiWhite "DEBUG: onTerminate1"
+      atomically $ modifyTVar semaphore pred
+      log ansiWhite "DEBUG: onTerminate2"
+    inotify <- INotify.initINotify
+    INotify.addWatch inotify [ INotify.Create ] root $ \case
+      INotify.Created{..}
+        | isDirectory -> pure ()
+        | otherwise -> case ByteString.stripPrefix prefix filePath of
+            Nothing -> pure ()
+            Just pid -> do
+              let path = ByteString.unpack $ root <> "/" <> filePath
+              log ansiGreen $ "opening " <> path
+              file <- openFile path ReadMode
+              buffer <- newIORef ""
+              let batch = do
+                    atomically $ modifyTVar semaphore succ
+                    lines <- getLines buffer =<< getAvailable file
+                    importLines database pid lines
+                    atomically $ modifyTVar semaphore pred
+              watch <- newEmptyMVar
+              let handler = \case
+                    INotify.Modified{..} -> do
+                      batch
+                    INotify.Closed{..} -> do
+                      log ansiRed $ "closing " <> path
+                      INotify.removeWatch =<< readMVar watch
+                      hClose file
+              putMVar watch =<< INotify.addWatch inotify
+                [ INotify.Modify
+                , INotify.CloseWrite
+                ]  (ByteString.pack path) handler
+              batch
+    await semaphore
   where
+    await semaphore = do
+      log ansiWhite "DEBUG: await1"
+      atomically $ readTVar semaphore >>= \n -> if n > 0 then retry else pure ()
+      log ansiWhite "DEBUG: await2"
+      threadDelay 1_000_000
+      log ansiWhite "DEBUG: await3" -- TODO: Need to track lastImportTime
+      atomically (readTVar semaphore) >>= \n -> if n > 0 then await semaphore else pure ()
+      log ansiWhite "DEBUG: await4"
     getLines buffer string =
       let (lhs, rhs) = ByteString.break (== '\n') string
       in if rhs == ByteString.empty
@@ -612,10 +619,18 @@ importer root prefix database = void $ do
           then (chunk <>) <$> getAvailable file
           else pure ByteString.empty
 
+importLines :: HasCallStack => Database -> ByteString -> [ByteString] -> IO ()
+importLines database pid lines = void $ forkIO $ do
+  let pairs = lines <&> \line -> (line, Parser.parseOnly parser $ pid <> " " <> line)
+  when (length pairs > 0) $ log ansiWhite $ "importing " <> show (length pairs) <>
+    " lines (pid " <> ByteString.unpack pid <> ")"
+  let warning = \case
+        (_, Right entry) -> pure $ Just entry
+        (line, Left e) ->
+          let message = e <> "\n" <> ByteString.unpack line
+          in log ansiYellow message $> Nothing
+  insert database =<< (catMaybes <$> traverse warning pairs)
 
-importerTest :: IO ()
-importerTest = withDatabase "/tmp/strace.sqlite" $
-  \db _ -> importer "/tmp/strace" "output" db
 
 --    lines <- take n . drop m . ByteString.lines <$> ByteString.readFile path
 --    putStrLn $ show (length lines) <> " lines read"
@@ -743,6 +758,27 @@ createSchema database = executeStatements database
   , [ "CREATE INDEX IF NOT EXISTS syscall_return_name ON syscall (return, name);" ]
   , [ "CREATE INDEX IF NOT EXISTS exit_pid_time ON exit (pid, time);" ]
   ]
+
+{-
+
+    Potential issue with triggers:
+
+    sqlite> select * from process left join syscall
+            on process.pid = syscall.pid and syscall.name = 'execve'
+            where process.pid = 2476;
+
+    pid   ppid  start            end              pid   time  name  args  return
+    ----  ----  ---------------  ---------------  ----  ----  ----  ----  ------
+    2476  2475  13:18:51.661714                   NULL  NULL  NULL  NULL  NULL
+    2476  NULL  NULL             13:18:51.686027  NULL  NULL  NULL  NULL  NULL
+
+    Think this happens because it is possible for a process exit to be imported before
+    the corresponding clone syscall in the parent process is imported if the process
+    runs for a very short time. In the above example it runs for a tad over 24ms.
+
+    TBC: How can the triggers be modified to account for this?
+
+-}
 
 --render :: Context -> [Process]
 --render = error "not implemented"

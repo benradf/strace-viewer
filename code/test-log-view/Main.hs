@@ -1,5 +1,6 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE NumericUnderscores #-}
 {-# LANGUAGE OverloadedLists #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -10,12 +11,13 @@ module Main where
 import Common.Test
 import Control.Arrow ((&&&))
 import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar, takeMVar)
 import Control.Monad (join)
 import qualified Data.Attoparsec.ByteString.Char8 as Parser
 import Data.Bifunctor (bimap, first)
 import Data.Coerce (coerce)
-import Data.Foldable (for_)
-import Data.Functor ((<&>), void)
+import Data.Foldable (for_, traverse_)
+import Data.Functor ((<&>))
 import Data.List (sortBy)
 import Data.List.NonEmpty ((<|), NonEmpty(..), fromList, nonEmpty)
 import qualified Data.List.NonEmpty as NonEmpty
@@ -27,8 +29,10 @@ import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import Data.Time.Clock (DiffTime)
 import Data.Time.LocalTime (TimeOfDay(..), timeOfDayToTime)
+import Data.Traversable (for)
 import qualified Filesystem
 import Strace
+import System.Directory (createDirectoryIfMissing)
 import System.IO (IOMode(..), withFile)
 import System.Posix.Types (ProcessID)
 import Test.QuickCheck (Arbitrary(..))
@@ -47,7 +51,7 @@ ghcid = do
     putStrLn $ "\x1b[0;37mwrite chunk to \x1b[1;37moutput." <> show pid <> "\x1b[0;37m:"
     putStrLn $ "\x1b[0;3m" <> Text.unpack chunk <> "\x1b[0;30m|\x1b[0m"
   let path = "/tmp/test-strace-import"
-  Filesystem.createDirectoryMaybe path
+  createDirectoryIfMissing True path
   processes <- generateOutput
   for_ processes $ \(pid, lines) -> do
     chunks <- chunkOutput lines
@@ -123,15 +127,23 @@ main = Tasty.defaultMain $
           }
         )
     , HUnit.testCase "strace-import" $ do
-        -- withBinaryRunning :: String -> [String] -> Environment -> IO a -> IO a
-        --let path = undefined
-        --withBinaryRunning "strace-import" [ path ] [] $ pure ()
-        pure ()
+        let path = "var/run/strace"
+        createDirectoryIfMissing True path
+        --putStrLn "\x1b[1;35mstrace-import\x1b[0m"
+        -- TBC
+        withBinaryRunning "strace-import" [ path ] [] $ do
+          processes <- generateOutput
+          done <- for processes $ \(pid, lines) -> do
+            chunks <- chunkOutput lines
+            writeOutput path pid $ first (floor . (5 *) . ((10 ^ 6) *)) <$> chunks
+          traverse_ takeMVar done
     ]
   where
     assertParse string expected =
       HUnit.assertEqual "unexpected parse" expected $
       Parser.parseOnly Strace.parser string
+
+        -- withBinaryRunning :: String -> [String] -> Environment -> IO a -> IO a
 
 {-
 
@@ -302,19 +314,6 @@ generateOutput = QuickCheck.generate $ do
       sequenceProcessGroup group@((pid, _) :| _) = (pid, snd <$> group)
   pure $ map sequenceProcessGroup $ groupByPid $ NonEmpty.toList pairs
 
-type Microseconds = Int
-
-writeOutput :: FilePath -> ProcessID -> NonEmpty (Microseconds, Text) -> IO ()
-writeOutput directory pid ((initialDelay, chunk) :| chunks) = void $ forkIO $ do
-  threadDelay initialDelay
-  let path = directory <> "/output." <> show pid
-  Filesystem.removeFileMaybe path
-  withFile path AppendMode $ \file -> do
-    Text.hPutStr file chunk
-    for_ chunks $ \(delay, chunk) -> do
-      threadDelay delay
-      Text.hPutStr file chunk
-
 chunkOutput :: NonEmpty OutputLine -> IO (NonEmpty (DiffTime, Text))
 chunkOutput lines = QuickCheck.generate $ do
   let extractTime = read @TimeOfDay . head &&& NonEmpty.fromList . (<> pure "\n")
@@ -335,6 +334,23 @@ chunkOutput lines = QuickCheck.generate $ do
       in case nonEmpty chunks of
           Just chunks -> (t' - t, text) <| differences t' chunks
           Nothing -> (t' - t, text) :| []
+
+type Microseconds = Int
+
+writeOutput :: FilePath -> ProcessID -> NonEmpty (Microseconds, Text) -> IO (MVar ())
+writeOutput directory pid ((initialDelay, chunk) :| chunks) = do
+  done <- newEmptyMVar
+  forkIO $ do
+    threadDelay initialDelay
+    let path = directory <> "/output." <> show pid
+    Filesystem.removeFileMaybe path
+    withFile path AppendMode $ \file -> do
+      Text.hPutStr file chunk
+      for_ chunks $ \(delay, chunk) -> do
+        threadDelay delay
+        Text.hPutStr file chunk
+    putMVar done ()
+  pure done
 
 -- tail -f var/run/strace/output.{1..20}
 -- Run test in slow motion and watch the order in which output files are created and written to.
