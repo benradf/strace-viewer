@@ -24,7 +24,6 @@ module Strace
   ) where
 
 import Control.Concurrent (forkIO, threadDelay)
-import Control.Concurrent.MVar (newEmptyMVar, putMVar, readMVar)
 import Control.Concurrent.STM (atomically, modifyTVar, newTVarIO, readTVar, retry)
 import Control.Monad (guard, when)
 import Data.Attoparsec.ByteString.Char8 (Parser)
@@ -32,7 +31,7 @@ import qualified Data.Attoparsec.ByteString.Char8 as Parser
 import qualified Data.ByteString.Char8 as ByteString
 import Data.Either (fromLeft, fromRight)
 import Data.FileEmbed (embedFile)
-import Data.Foldable (for_)
+import Data.Foldable (for_, traverse_)
 import Data.Functor (($>), (<&>), void)
 import Data.IORef (atomicModifyIORef, modifyIORef, newIORef)
 import Data.Int (Int64)
@@ -41,7 +40,7 @@ import Data.List.NonEmpty (NonEmpty(..))
 import qualified Data.List.NonEmpty as NonEmpty
 import Data.Map (Map)
 import qualified Data.Map as Map
-import Data.Maybe (catMaybes, fromJust, fromMaybe, mapMaybe)
+import Data.Maybe (catMaybes, fromJust, fromMaybe, isNothing, mapMaybe)
 import Data.Ord (comparing)
 import Data.Ratio((%), Ratio)
 import Data.Set (Set)
@@ -567,45 +566,48 @@ importer root prefix = withDatabase (ByteString.unpack root <> "/strace.sqlite")
       log ansiWhite "DEBUG: onTerminate1"
       atomically $ modifyTVar semaphore pred
       log ansiWhite "DEBUG: onTerminate2"
+    actions <- newTVarIO Map.empty
+    let lookupActions filePath = atomically $ Map.lookup filePath <$> readTVar actions
     inotify <- INotify.initINotify
-    INotify.addWatch inotify [ INotify.Create ] root $ \case
-      INotify.Created{..}
-        | isDirectory -> pure ()
-        | otherwise -> case ByteString.stripPrefix prefix filePath of
-            Nothing -> pure ()
-            Just pid -> do
-              let path = ByteString.unpack $ root <> "/" <> filePath
-              log ansiGreen $ "opening " <> path
-              file <- openFile path ReadMode
-              buffer <- newIORef ""
-              let batch = do
-                    atomically $ modifyTVar semaphore succ
-                    lines <- getLines buffer =<< getAvailable file
-                    importLines database pid lines
-                    atomically $ modifyTVar semaphore pred
-              watch <- newEmptyMVar
-              let handler = \case
-                    INotify.Modified{..} -> do
-                      batch
-                    INotify.Closed{..} -> do
-                      log ansiRed $ "closing " <> path
-                      INotify.removeWatch =<< readMVar watch
-                      hClose file
-              putMVar watch =<< INotify.addWatch inotify
-                [ INotify.Modify
-                , INotify.CloseWrite
-                ]  (ByteString.pack path) handler
-              batch
+    INotify.addWatch inotify
+      [ INotify.Create
+      , INotify.Modify
+      , INotify.CloseWrite
+      ] root $ \case
+        INotify.Created{..}
+          | isDirectory -> pure ()
+          | otherwise -> case ByteString.stripPrefix prefix filePath of
+              Nothing -> pure ()
+              Just pid -> lookupActions filePath >>= \case
+                Just _ -> log ansiYellow $ "already open: " <> ByteString.unpack filePath
+                Nothing -> do
+                  let path = ByteString.unpack $ root <> "/" <> filePath
+                  log ansiGreen $ "opening " <> path
+                  file <- openFile path ReadMode
+                  buffer <- newIORef ""
+                  let batch = do
+                        atomically $ modifyTVar semaphore succ
+                        lines <- getLines buffer =<< getAvailable file
+                        importLines database pid lines
+                        -- TBC: Update lastImportTime
+                        atomically $ modifyTVar semaphore pred
+                      close = do
+                        log ansiRed $ "closing " <> path
+                        hClose file
+                  atomically $ modifyTVar actions $ Map.insert filePath (batch, close)
+                  batch
+        INotify.Modified{..}
+          | isDirectory || isNothing maybeFilePath -> pure()
+          | otherwise -> traverse_ fst =<< lookupActions (fromJust maybeFilePath)
+        INotify.Closed{..}
+          | isDirectory || isNothing maybeFilePath -> pure()
+          | otherwise -> traverse_ snd =<< lookupActions (fromJust maybeFilePath)
     await semaphore
   where
     await semaphore = do
-      log ansiWhite "DEBUG: await1"
       atomically $ readTVar semaphore >>= \n -> if n > 0 then retry else pure ()
-      log ansiWhite "DEBUG: await2"
       threadDelay 1_000_000
-      log ansiWhite "DEBUG: await3" -- TODO: Need to track lastImportTime
-      atomically (readTVar semaphore) >>= \n -> if n > 0 then await semaphore else pure ()
-      log ansiWhite "DEBUG: await4"
+      -- TBC: If lastImportTime is within the last N seconds then `await semaphore` else `pure ()`
     getLines buffer string =
       let (lhs, rhs) = ByteString.break (== '\n') string
       in if rhs == ByteString.empty
