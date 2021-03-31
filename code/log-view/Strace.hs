@@ -23,8 +23,8 @@ module Strace
   , processes
   ) where
 
-import Control.Concurrent (forkIO)
-import Control.Concurrent.STM (atomically, modifyTVar, newTVarIO, readTVar, retry, stateTVar, writeTVar)
+import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent.STM (atomically, modifyTVar, newTVarIO, readTVar, readTVarIO, retry, writeTVar)
 import Control.Monad (guard, when)
 import Data.Attoparsec.ByteString.Char8 (Parser)
 import qualified Data.Attoparsec.ByteString.Char8 as Parser
@@ -51,7 +51,7 @@ import Data.Text.Encoding (decodeUtf8)
 import qualified Data.Text.Encoding as Text
 import Data.Text.Lazy (toStrict)
 import qualified Data.Text.Lazy.Encoding as LazyText
-import Data.Time.Clock (addUTCTime, getCurrentTime)
+import Data.Time.Clock (addUTCTime, diffUTCTime, getCurrentTime)
 import Data.Time.Format (defaultTimeLocale, parseTimeM)
 import Data.Time.Format.ISO8601 (iso8601ParseM, iso8601Show)
 import Data.Time.LocalTime (TimeOfDay, timeOfDayToTime, timeToTimeOfDay)
@@ -568,7 +568,7 @@ importer root prefix = withDatabase (ByteString.unpack root <> "/strace.sqlite")
     let lookupActions filePath = atomically $ Map.lookup filePath <$> readTVar actions
     lastImportTime <- newTVarIO =<< getCurrentTime
     inotify <- INotify.initINotify
-    INotify.addWatch inotify
+    watch <- INotify.addWatch inotify
       [ INotify.Create
       , INotify.Modify
       , INotify.CloseWrite
@@ -587,33 +587,39 @@ importer root prefix = withDatabase (ByteString.unpack root <> "/strace.sqlite")
                   let batch = do
                           atomically $ modifyTVar semaphore succ
                           importLines database pid =<< getLines buffer =<< getAvailable file
-                          atomically . writeTVar lastImportTime =<< getCurrentTime
-                          atomically $ modifyTVar semaphore pred
+                          now <- getCurrentTime
+                          atomically $ do
+                            writeTVar lastImportTime now
+                            modifyTVar semaphore pred
                       close = do
                         log ansiRed ("closing " <> path)
+                        atomically $ modifyTVar actions $ Map.delete filePath
                         hClose file
                   atomically $ modifyTVar actions $ Map.insert filePath (batch, close)
                   batch
         INotify.Modified{..}
           | isDirectory || isNothing maybeFilePath -> pure()
-          | otherwise -> do
-              running <- atomically $ stateTVar semaphore $ \n -> if n > 0 then (True, succ n) else (False, n)
-              if running
-                then traverse_ fst =<< lookupActions (fromJust maybeFilePath)
-                else log ansiYellow "no longer running"
+          | otherwise -> traverse_ fst =<< lookupActions (fromJust maybeFilePath)
         INotify.Closed{..}
           | isDirectory || isNothing maybeFilePath -> pure()
           | otherwise -> traverse_ snd =<< lookupActions (fromJust maybeFilePath)
-    await semaphore actions lastImportTime
+    let await = do
+          atomically $ readTVar semaphore >>= \n -> if n == 0 then pure () else retry
+          waitUntilTime <- addUTCTime 5 <$> readTVarIO lastImportTime
+          now <- getCurrentTime
+          if now < waitUntilTime
+            then do
+              threadDelay $ floor $ diffUTCTime waitUntilTime now * 10 ^ 6
+              await
+            else do
+              log ansiBlue "shutting down"
+              INotify.removeWatch watch
+              threadDelay 1_000_000
+              actions <- Map.elems <$> readTVarIO actions
+              for_ actions $ uncurry (*>)
+    await
+    interrupt
   where
-    await semaphore actions lastImportTime = do
-      now <- getCurrentTime
-      atomically $ do
-        n <- readTVar semaphore
-        waitUntilTime <- addUTCTime 5 <$> readTVar lastImportTime
-        if n > 0 || waitUntilTime < now then retry else pure ()  --TBC: Move time check outside STM
-      log ansiBlue "shutting down"
-      traverse_ (uncurry (*>)) =<< atomically (Map.elems <$> readTVar actions)
     getLines buffer string =
       let (lhs, rhs) = ByteString.break (== '\n') string
       in if rhs == ByteString.empty
