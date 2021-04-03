@@ -35,6 +35,7 @@ import qualified Database.SQLite3 as SQLite3
 import GHC.Stack (HasCallStack)
 import Log
 import Prelude hiding (log)
+import System.Environment (lookupEnv)
 
 withDatabase :: FilePath -> (Database -> IO () -> IO ()) -> IO ()
 withDatabase path application =
@@ -73,15 +74,20 @@ handleConflict action =
 executeSql :: HasCallStack => Database -> [Text] -> [SQLData] -> IO [[SQLData]]
 executeSql database sql params =
   withStatement database (Text.unlines sql) $ \statement -> do
-    log ansiMagenta $ Text.unpack $ Text.unwords sql
-    log ansiMagenta $ "? " <> show params
+    logIfEnabled ansiMagenta $ Text.unpack $ Text.unwords sql
+    logIfEnabled ansiMagenta $ "? " <> show params
     SQLite3.bind statement params
     let fetch = SQLite3.stepNoCB statement >>= \case
           Row -> (:) <$> SQLite3.columns statement <*> fetch
           Done -> pure []
     results <- handleConflict fetch
-    log ansiYellow $ "! " <> show results
+    logIfEnabled ansiYellow $ "! " <> show results
     pure results
+  where
+    logIfEnabled ansi string =
+      lookupEnv "LOG_SQLITE" >>= \case
+        Just "disabled" -> pure ()
+        _ -> log ansi string
 
 executeSqlScalar :: Database -> [Text] -> [SQLData] -> IO SQLData
 executeSqlScalar database sql params = do

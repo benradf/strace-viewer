@@ -18,9 +18,10 @@ import Data.Bifunctor (bimap, first)
 import Data.Coerce (coerce)
 import Data.Foldable (for_, traverse_)
 import Data.Functor ((<&>))
-import Data.List (sortBy)
+import Data.List (isPrefixOf, sortBy, stripPrefix)
 import Data.List.NonEmpty ((<|), NonEmpty(..), fromList, nonEmpty)
 import qualified Data.List.NonEmpty as NonEmpty
+import Data.Maybe (mapMaybe)
 import Data.Ord (comparing)
 import Data.Ratio ((%))
 import Data.Semigroup (sconcat)
@@ -30,9 +31,12 @@ import qualified Data.Text.IO as Text
 import Data.Time.Clock (DiffTime)
 import Data.Time.LocalTime (TimeOfDay(..), timeOfDayToTime)
 import Data.Traversable (for)
+import Database.SQLite3 (SQLData(..))
 import qualified Filesystem
+import qualified Sqlite
 import Strace
-import System.Directory (createDirectoryIfMissing)
+import System.Directory (createDirectoryIfMissing, listDirectory)
+import System.Environment (setEnv)
 import System.IO (IOMode(..), withFile)
 import System.Posix.Types (ProcessID)
 import Test.QuickCheck (Arbitrary(..))
@@ -129,21 +133,53 @@ main = Tasty.defaultMain $
     , HUnit.testCase "strace-import" $ do
         let path = "var/run/strace"
         createDirectoryIfMissing True path
-        --putStrLn "\x1b[1;35mstrace-import\x1b[0m"
-        -- TBC
         withBinaryRunning "strace-import" [ path ] [] $ do
           processes <- generateOutput
           done <- for processes $ \(pid, lines) -> do
             chunks <- chunkOutput lines
             writeOutput path pid $ first (floor . (5 *) . ((10 ^ 6) *)) <$> chunks
           traverse_ takeMVar done
+        setEnv "LOG_SQLITE" "disabled"
+        withDatabase (path <> "/strace.sqlite") $ \database _ -> do
+          assertLinesMatch "syscall" path database
+            (filter $ not . uncurry (||) . ((" +++" `isPrefixOf`) &&& (" ---" `isPrefixOf`)) . (dropWhile (/= ' ')))
+            [ "SELECT time || \" \" || name || args || \" = \" || return"
+            , "FROM syscall WHERE pid = ? ORDER BY time;" ]
+          assertLinesMatch "exited" path database
+            (filter $ (" +++ exited with " `isPrefixOf`) . (dropWhile (/= ' ')))
+            [ "SELECT time || \" +++ exited with \" || code || \" +++\""
+            , "FROM exit WHERE code IS NOT NULL AND pid = ? ORDER BY time;" ]
+          assertLinesMatch "killed" path database
+            (filter $ (" +++ killed by SIG" `isPrefixOf`) . (dropWhile (/= ' ')))
+            [ "SELECT time || \" +++ killed by SIG\" || signal || \" +++\""
+            , "FROM exit WHERE signal IS NOT NULL AND pid = ? ORDER BY time;" ]
+          assertLinesMatch "signal" path database
+            (filter $ (" --- SIG" `isPrefixOf`) . (dropWhile (/= ' ')))
+            [ "SELECT time || \" --- SIG\" || type || \" {si_signo=SIG\" || type ||"
+            , "  \", si_code=SI_USER, si_pid=1134, si_uid=0} ---\""
+            , "FROM signal WHERE pid = ? ORDER BY time;"
+            ] {- diff <(<var/run/strace/output.14 grep -v '^\S\+\( +++\| ---\)') \
+                      <(sqlite3 -noheader var/run/strace/strace.sqlite \
+                        'SELECT time || " " || name || args || " = " || return FROM syscall WHERE pid = 14;') | less -}
     ]
   where
     assertParse string expected =
       HUnit.assertEqual "unexpected parse" expected $
       Parser.parseOnly Strace.parser string
-
-        -- withBinaryRunning :: String -> [String] -> Environment -> IO a -> IO a
+    assertLinesMatch lineType path database filterOutput queryActual = do
+      processes <- mapMaybe (stripPrefix "output.") <$> listDirectory path
+      for_ processes $ \pid -> do
+        expected <- filterOutput . lines <$> readFile (path <> "/output." <> pid)
+        actual <- Sqlite.executeSql database queryActual [ SQLInteger $ read pid ]
+        case (length expected, length actual) of
+          (expectedCount, actualCount)
+            | expectedCount /= actualCount -> HUnit.assertFailure $
+                "output." <> pid <> " has " <> show expectedCount <> " " <> lineType <>
+                " lines, but query returned " <> show actualCount <> " records"
+            | (pure . SQLText . Text.pack <$> expected) /= actual -> HUnit.assertFailure $
+                "query returns correct number of " <> lineType <> " records for output." <>
+                pid <> " but their values are unexpected"
+            | otherwise -> pure ()
 
 {-
 
@@ -247,13 +283,13 @@ instance Arbitrary OutputLine where
             , "(\"/etc/ld-nix.so.preload\", R_OK)"
             , "(\"var/log\", {st_mode=S_IFDIR|0755, st_size=18, ...})"
             , "()"
-            , "(0x7fd4fe5e1000, 110592, PROT_READ|PROT_EXEC, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 3, 0x7000) "
+            , "(0x7fd4fe5e1000, 110592, PROT_READ|PROT_EXEC, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 3, 0x7000)"
             , "(1, \"\33[0;30m[1] 2021-03-15 19:40:54.7\"..., 102)"
             , "(1, \"\33[0;30m[6498] 2021-03-15 19:40:5\"..., 121)"
             , "(3)"
             , "(3, 1)"
             , "(3, 2)"
-            , "(3, {st_mode=S_IFREG|0555, st_size=336648, ...}) "
+            , "(3, {st_mode=S_IFREG|0555, st_size=336648, ...})"
             , "(<... resuming interrupted read ...>)"
             , "(AT_FDCWD, \"/etc/localtime\", O_RDONLY|O_CLOEXEC)"
             , "(AT_FDCWD, \"/etc/localtime\", O_RDONLY|O_CLOEXEC)"
