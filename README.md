@@ -12,7 +12,7 @@ might be hundreds of megabytes of logs across numerous files.
 This project is intended to make it easier to understand and explore the logs
 when `strace` is run in the latter mode. It has two components:
 - **strace-import**: uses
-  [inotify](https://man7.org/linux/man-pages/man7/inotify.7.html) for watch for
+  [inotify](https://man7.org/linux/man-pages/man7/inotify.7.html) to watch for
 changes to strace log files and import them into a
 [sqlite](https://www.sqlite.org/index.html) database.
 
